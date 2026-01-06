@@ -389,9 +389,29 @@ namespace
         {
             if (!c.settings->ignored_functions.contains(export_entry->second))
             {
+                std::string caller_func_name = std::format("0x{:x}", previous_ip);
+
+                if (previous_binary)
+                {
+                    if (auto it = previous_binary->address_names.upper_bound(previous_ip); it != previous_binary->address_names.begin())
+                    {
+                        --it;
+
+                        const auto func_base = it->first;
+                        const auto func_name = it->second;
+                        const auto func_offset = previous_ip - func_base;
+
+                        if (func_offset < 0x1000)
+                        {
+                            caller_func_name = std::format("{}+0x{:x}", func_name, func_offset);
+                        }
+                    }
+                }
+
                 win_emu.log.print(is_interesting_call ? color::yellow : color::dark_gray,
-                                  "Executing function: %s (%s) (0x%" PRIx64 ") via (0x%" PRIx64 ") %s\n", export_entry->second.c_str(),
-                                  binary->name.c_str(), address, previous_ip, previous_binary ? previous_binary->name.c_str() : "<N/A>");
+                                  "Executing function: %s (%s) (0x%" PRIx64 ") via %s (%s)\n", export_entry->second.c_str(),
+                                  binary->name.c_str(), address, caller_func_name.c_str(),
+                                  previous_binary ? previous_binary->name.c_str() : "<N/A>");
 
                 if (is_interesting_call)
                 {
@@ -479,10 +499,24 @@ namespace
                 uint64_t return_address{};
                 emu.try_read_memory(rsp, &return_address, sizeof(return_address));
 
-                const auto* caller_mod_name = win_emu.mod_manager.find_name(return_address);
+                const auto caller_mod = win_emu.mod_manager.find_by_address(return_address);
+                std::string caller_func_name = std::format("0x{:x}", return_address);
 
-                win_emu.log.print(color::dark_gray, "Executing syscall: %.*s (0x%X) at 0x%" PRIx64 " via 0x%" PRIx64 " (%s)\n",
-                                  STR_VIEW_VA(syscall_name), syscall_id, address, return_address, caller_mod_name);
+                if (auto it = caller_mod->address_names.upper_bound(return_address); it != caller_mod->address_names.begin())
+                {
+                    --it;
+
+                    const auto func_base = it->first;
+                    const auto func_offset = return_address - func_base;
+
+                    if (func_offset < 0x1000)
+                    {
+                        caller_func_name = std::format("{}+0x{:x}", it->second, func_offset);
+                    }
+                }
+
+                win_emu.log.print(color::dark_gray, "Executing syscall: %.*s (0x%X) at 0x%" PRIx64 " via %s (%s)\n",
+                                  STR_VIEW_VA(syscall_name), syscall_id, address, caller_func_name.c_str(), caller_mod->name.c_str());
             }
         }
         else
