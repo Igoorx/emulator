@@ -358,7 +358,7 @@ namespace syscalls
     }
 
     NTSTATUS handle_NtQuerySecurityAttributesToken(const syscall_context& c, const handle token_handle,
-                                                   emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> /*attributes*/,
+                                                   emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> attributes,
                                                    const ULONG /*number_of_attributes*/, const uint64_t buffer, const ULONG buffer_length,
                                                    const emulator_object<ULONG> return_length)
     {
@@ -382,6 +382,12 @@ namespace syscalls
         if (buffer_length < required_size)
         {
             return STATUS_BUFFER_TOO_SMALL;
+        }
+
+        auto attribute_name = read_unicode_string(c.emu, attributes);
+        if (attribute_name == u"WIN://SYSAPPID")
+        {
+            return STATUS_NOT_SUPPORTED;
         }
 
         c.emu.write_memory(buffer, TOKEN_SECURITY_ATTRIBUTES_INFORMATION{
