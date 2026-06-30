@@ -24,6 +24,7 @@ namespace sogen
         void setup(const bool is_wow64_process)
         {
             this->is_wow64_process_ = is_wow64_process;
+            this->next_index_ = 1;
 
             used_indices_.resize(MAX_HANDLES, false);
 
@@ -157,6 +158,7 @@ namespace sogen
             buffer.write(wnd_message_bits_addr_);
             buffer.write(wnd_message_bits_addrs_);
             buffer.write_vector(used_indices_);
+            buffer.write(next_index_);
             buffer.write(is_wow64_process_);
         }
 
@@ -168,6 +170,7 @@ namespace sogen
             buffer.read(wnd_message_bits_addr_);
             buffer.read(wnd_message_bits_addrs_);
             buffer.read_vector(used_indices_);
+            buffer.read(next_index_);
             buffer.read(is_wow64_process_);
         }
 
@@ -269,13 +272,38 @@ namespace sogen
 
         uint32_t find_free_index() const
         {
-            for (uint32_t i = 1; i < used_indices_.size(); ++i)
+            uint32_t start = next_index_;
+            if (start == 0 || start >= used_indices_.size())
+            {
+                start = 1;
+            }
+
+            for (uint32_t i = start; i < used_indices_.size(); ++i)
             {
                 if (!used_indices_.at(i))
                 {
+                    next_index_ = i + 1;
+                    if (next_index_ >= used_indices_.size())
+                    {
+                        next_index_ = 1;
+                    }
                     return i;
                 }
             }
+
+            for (uint32_t i = 1; i < start; ++i)
+            {
+                if (!used_indices_[i])
+                {
+                    next_index_ = i + 1;
+                    if (next_index_ >= used_indices_.size())
+                    {
+                        next_index_ = 1;
+                    }
+                    return i;
+                }
+            }
+
             throw std::runtime_error("No more user handles available");
         }
 
@@ -309,6 +337,7 @@ namespace sogen
         uint64_t wnd_message_bits_addr_{};
         std::array<uint64_t, WND_MESSAGE_BITS_COUNT> wnd_message_bits_addrs_{};
         std::vector<bool> used_indices_{};
+        mutable uint32_t next_index_{1};
         memory_manager* memory_{};
         bool is_wow64_process_{};
     };

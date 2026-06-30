@@ -4,6 +4,7 @@
 #include "emulator_utils.hpp"
 #include "registry/registry_utils.hpp"
 #include "syscall_utils.hpp"
+#include "win32k_userconnect.hpp"
 #include "windows_emulator.hpp"
 #include "version/windows_version_manager.hpp"
 
@@ -518,6 +519,7 @@ namespace sogen
         this->default_register_set = emu.save_registers();
 
         this->user_handles.setup(is_wow64_process);
+        win32k_userconnect::seed_system_class_atoms(memory, *this);
 
         auto [mh, monitor_obj] = this->user_handles.allocate_object<USER_MONITOR>(handle_types::monitor);
         this->default_monitor_handle = mh;

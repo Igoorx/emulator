@@ -134,6 +134,11 @@ namespace sogen
         {
             return u"ComboBox";
         }
+        if (class_name == u"COMBOLBOX" || class_name == u"ComboLBox")
+        {
+            return u"ComboLBox";
+        }
+
         return class_name;
     }
 

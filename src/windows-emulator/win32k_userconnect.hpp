@@ -25,6 +25,7 @@ namespace sogen
         void populate_user_shared_info(USER_SHAREDINFO& shared, const process_context& process);
         bool try_write_user_shared_info(memory_interface& memory, uint64_t destination, const process_context& process);
         bool try_write_api_port_userconnect_reply(memory_interface& memory, uint64_t reply_base, const process_context& process);
+        void seed_system_class_atoms(memory_interface& memory, process_context& process);
         bool try_update_client_pfn_arrays_from_addresses(memory_interface& memory, process_context& process, uint64_t apfn_client_a,
                                                          uint64_t apfn_client_w, uint64_t apfn_client_worker);
         bool try_bootstrap_client_pfn_arrays_from_ntdll(windows_emulator& win_emu);

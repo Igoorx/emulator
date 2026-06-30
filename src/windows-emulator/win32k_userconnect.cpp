@@ -148,6 +148,8 @@ namespace sogen
                 return false;
             }
 
+            // Seed after the pfn copy: the worker-array fill overlaps these SERVERINFO fields.
+            win32k_userconnect::seed_system_class_atoms(memory, process);
             seed_messagebox_button_strings(memory, process.user_handles.get_server_info().value());
 
             refresh_dispatch_client_message(process);
@@ -158,6 +160,37 @@ namespace sogen
 
     namespace win32k_userconnect
     {
+        void seed_system_class_atoms(memory_interface& memory, process_context& process)
+        {
+            static constexpr std::array system_class_atoms = {
+                std::pair{std::u16string_view{u"Button"}, uint64_t{0x364}},    std::pair{std::u16string_view{u"Edit"}, uint64_t{0x366}},
+                std::pair{std::u16string_view{u"Static"}, uint64_t{0x368}},    std::pair{std::u16string_view{u"ListBox"}, uint64_t{0x36A}},
+                std::pair{std::u16string_view{u"ScrollBar"}, uint64_t{0x36C}}, std::pair{std::u16string_view{u"ComboBox"}, uint64_t{0x36E}},
+                std::pair{std::u16string_view{u"ComboLBox"}, uint64_t{0x372}},
+            };
+
+            const auto server_info = process.user_handles.get_server_info().value();
+            for (const auto& [name, offset] : system_class_atoms)
+            {
+                uint16_t atom = 0;
+                for (const auto& [candidate, entry] : process.atoms)
+                {
+                    if (utils::string::equals_ignore_case(std::u16string_view{entry.name}, name))
+                    {
+                        atom = candidate;
+                        break;
+                    }
+                }
+
+                if (atom == 0)
+                {
+                    atom = process.add_or_find_atom(std::u16string{name});
+                }
+
+                memory.write_memory(server_info + offset, &atom, sizeof(atom));
+            }
+        }
+
         NTSTATUS narrow_wow64_address(const uint64_t address, uint32_t& narrowed)
         {
             narrowed = 0;

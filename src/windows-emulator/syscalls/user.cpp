@@ -29,7 +29,10 @@ namespace sogen
         constexpr uint32_t k_fn_inout_lp_point5_callback_id = 0x12;
         constexpr uint32_t k_fn_inout_nc_calc_size_callback_id = 0x15;
         constexpr size_t k_client_pfn_button_wndproc_index = 7;
+        constexpr size_t k_client_pfn_combolbox_wndproc_index = 9;
         constexpr size_t k_client_pfn_dialog_wndproc_index = 10;
+        constexpr size_t k_client_pfn_edit_wndproc_index = 11;
+        constexpr size_t k_client_pfn_listbox_wndproc_index = 12;
         constexpr size_t k_client_pfn_static_wndproc_index = 14;
         constexpr uint32_t k_ctlcolor_edit = 1;
         constexpr uint32_t k_ctlcolor_listbox = 2;
@@ -152,10 +155,46 @@ namespace sogen
             return name;
         }
 
+        std::optional<uint64_t> get_builtin_class_atom_offset(const std::u16string_view class_name)
+        {
+            const auto normalized = normalize_builtin_window_class_name(class_name);
+            if (normalized == u"Button")
+            {
+                return 0x364;
+            }
+            if (normalized == u"Edit")
+            {
+                return 0x366;
+            }
+            if (normalized == u"Static")
+            {
+                return 0x368;
+            }
+            if (normalized == u"ListBox")
+            {
+                return 0x36A;
+            }
+            if (normalized == u"ScrollBar")
+            {
+                return 0x36C;
+            }
+            if (normalized == u"ComboBox")
+            {
+                return 0x36E;
+            }
+            if (normalized == u"ComboLBox")
+            {
+                return 0x372;
+            }
+
+            return std::nullopt;
+        }
+
         bool is_builtin_window_class_name(const std::u16string_view class_name)
         {
             const auto normalized = normalize_builtin_window_class_name(class_name);
-            return normalized == builtin_dialog_class_name || normalized == u"Button" || normalized == u"Static";
+            return normalized == builtin_dialog_class_name || normalized == u"Button" || normalized == u"ComboLBox" ||
+                   normalized == u"Edit" || normalized == u"ListBox" || normalized == u"Static";
         }
 
         uint16_t get_builtin_window_fnid(const std::u16string_view class_name)
@@ -163,15 +202,27 @@ namespace sogen
             const auto normalized = normalize_builtin_window_class_name(class_name);
             if (normalized == u"Button")
             {
-                return 0x02A1;
+                return FNID_BUTTON;
+            }
+            if (normalized == u"ComboLBox")
+            {
+                return FNID_COMBOLBOX;
             }
             if (normalized == builtin_dialog_class_name)
             {
-                return 0x02A4;
+                return FNID_DIALOG;
+            }
+            if (normalized == u"Edit")
+            {
+                return FNID_EDIT;
+            }
+            if (normalized == u"ListBox")
+            {
+                return FNID_LISTBOX;
             }
             if (normalized == u"Static")
             {
-                return 0x02A8;
+                return FNID_STATIC;
             }
 
             return 0;
@@ -220,6 +271,14 @@ namespace sogen
                         wnd_proc = server_info.apfnClientA[k_client_pfn_button_wndproc_index];
                     }
                 }
+                else if (normalized_name == u"ComboLBox")
+                {
+                    wnd_proc = server_info.apfnClientW[k_client_pfn_combolbox_wndproc_index];
+                    if (wnd_proc == 0)
+                    {
+                        wnd_proc = server_info.apfnClientA[k_client_pfn_combolbox_wndproc_index];
+                    }
+                }
                 else if (normalized_name == u"Static")
                 {
                     wnd_proc = server_info.apfnClientW[k_client_pfn_static_wndproc_index];
@@ -236,9 +295,26 @@ namespace sogen
                         wnd_proc = server_info.apfnClientA[k_client_pfn_dialog_wndproc_index];
                     }
                 }
+                else if (normalized_name == u"Edit")
+                {
+                    wnd_proc = server_info.apfnClientW[k_client_pfn_edit_wndproc_index];
+                    if (wnd_proc == 0)
+                    {
+                        wnd_proc = server_info.apfnClientA[k_client_pfn_edit_wndproc_index];
+                    }
+                }
+                else if (normalized_name == u"ListBox")
+                {
+                    wnd_proc = server_info.apfnClientW[k_client_pfn_listbox_wndproc_index];
+                    if (wnd_proc == 0)
+                    {
+                        wnd_proc = server_info.apfnClientA[k_client_pfn_listbox_wndproc_index];
+                    }
+                }
             });
 
-            if (normalized_name == u"Button" || normalized_name == u"Static")
+            if (normalized_name == u"Button" || normalized_name == u"ComboLBox" || normalized_name == u"Edit" ||
+                normalized_name == u"ListBox" || normalized_name == u"Static")
             {
                 wnd_extra = 8;
             }
@@ -603,6 +679,9 @@ namespace sogen
 
             case WM_ERASEBKGND:
                 return TRUE;
+
+            case WM_NCHITTEST:
+                return HTCLIENT;
 
             case WM_PAINT:
                 validate_window(win);
@@ -997,12 +1076,10 @@ namespace sogen
         }
 
         // user32's dialog manager turns a control-class ordinal (0x80=Button, 0x81=Edit, 0x82=Static,
-        // 0x83=ListBox, 0x84=ScrollBar, 0x85=ComboBox) into a class atom by indexing the WORD table
-        // SERVERINFO.atomSysClass[ICLS] at gpsi+0x364 with (ordinal & 0x7F), then hands that atom to
-        // NtUserCreateWindowEx. Those atom values are assigned per build, so the same control shows up
-        // as e.g. atom 0x7F0 on one Windows version and a different value on another. Map an incoming
-        // integer atom back to its canonical builtin class name by reverse-looking it up in that table,
-        // which is portable across builds (no hardcoded atom values).
+        // 0x83=ListBox, 0x84=ScrollBar, 0x85=ComboBox) into a class atom from SERVERINFO.atomSysClass,
+        // then hands that atom to NtUserCreateWindowEx. ComboBox creates its private ComboLBox class
+        // from a later slot in the same table. Reverse-look up these build-specific atom values instead
+        // of hardcoding them.
         std::u16string_view resolve_builtin_class_atom(const syscall_context& c, const uint16_t atom)
         {
             if (atom == 0)
@@ -1010,11 +1087,18 @@ namespace sogen
                 return {};
             }
 
-            static constexpr std::array<std::u16string_view, 6> class_names = {
-                u"Button", u"Edit", u"Static", u"ListBox", u"ScrollBar", u"ComboBox",
+            struct builtin_class_atom
+            {
+                uint64_t offset;
+                std::u16string_view name;
             };
 
-            constexpr uint64_t k_atom_sys_class_offset = 0x364;
+            static constexpr std::array class_atoms = {
+                builtin_class_atom{.offset = 0x364, .name = u"Button"},    builtin_class_atom{.offset = 0x366, .name = u"Edit"},
+                builtin_class_atom{.offset = 0x368, .name = u"Static"},    builtin_class_atom{.offset = 0x36A, .name = u"ListBox"},
+                builtin_class_atom{.offset = 0x36C, .name = u"ScrollBar"}, builtin_class_atom{.offset = 0x36E, .name = u"ComboBox"},
+                builtin_class_atom{.offset = 0x372, .name = u"ComboLBox"},
+            };
 
             const auto serverinfo_base = c.proc.user_handles.get_server_info().value();
             if (serverinfo_base == 0)
@@ -1022,13 +1106,13 @@ namespace sogen
                 return {};
             }
 
-            for (size_t i = 0; i < class_names.size(); ++i)
+            for (const auto& class_atom : class_atoms)
             {
                 uint16_t entry = 0;
-                const auto address = serverinfo_base + k_atom_sys_class_offset + i * sizeof(uint16_t);
+                const auto address = serverinfo_base + class_atom.offset;
                 if (c.win_emu.memory.try_read_memory(address, &entry, sizeof(entry)) && entry == atom)
                 {
-                    return class_names[i];
+                    return class_atom.name;
                 }
             }
 
@@ -2465,6 +2549,12 @@ namespace sogen
             c.proc.classes.insert_or_assign(class_name_str, entry);
             c.proc.classes.insert_or_assign(make_atom_class_name(index), entry);
 
+            if (const auto atom_offset = get_builtin_class_atom_offset(class_name_str))
+            {
+                const auto atom_address = c.proc.user_handles.get_server_info().value() + *atom_offset;
+                c.win_emu.memory.write_memory(atom_address, &index, sizeof(index));
+            }
+
             return index;
         }
 
@@ -2905,18 +2995,28 @@ namespace sogen
                 const auto move_lparam = static_cast<uint64_t>(((y & 0xFFFF) << 16) | (x & 0xFFFF));
                 const auto size_lparam = static_cast<uint64_t>(((height & 0xFFFF) << 16) | (width & 0xFFFF));
 
-                const std::initializer_list<qmsg> sw_messages = {
+                std::vector<qmsg> sw_messages = {
                     {.message = WM_MOVE, .wParam = 0, .lParam = move_lparam},
                     {.message = WM_SIZE, .wParam = 0, .lParam = size_lparam},
                     {.message = WM_WINDOWPOSCHANGED, .wParam = 0, .lParam = state.window_pos_alloc.address()},
-                    {.message = WM_SETFOCUS, .wParam = 0, .lParam = 0},
-                    {.message = WM_ACTIVATE, .wParam = 1, .lParam = 0},
-                    {.message = WM_NCACTIVATE, .wParam = 1, .lParam = 0},
-                    {.message = WM_WINDOWPOSCHANGING, .wParam = 0, .lParam = state.window_pos_alloc.address()},
-                    {.message = WM_WINDOWPOSCHANGING, .wParam = 0, .lParam = state.window_pos_alloc.address()},
-                    {.message = WM_SHOWWINDOW, .wParam = 1, .lParam = 0},
                 };
-                state.message_queue.insert(state.message_queue.begin(), sw_messages);
+
+                if (!has_child_parent)
+                {
+                    sw_messages.insert(sw_messages.end(), {
+                                                              {.message = WM_SETFOCUS, .wParam = 0, .lParam = 0},
+                                                              {.message = WM_ACTIVATE, .wParam = 1, .lParam = 0},
+                                                              {.message = WM_NCACTIVATE, .wParam = 1, .lParam = 0},
+                                                          });
+                }
+
+                sw_messages.insert(sw_messages.end(),
+                                   {
+                                       {.message = WM_WINDOWPOSCHANGING, .wParam = 0, .lParam = state.window_pos_alloc.address()},
+                                       {.message = WM_WINDOWPOSCHANGING, .wParam = 0, .lParam = state.window_pos_alloc.address()},
+                                       {.message = WM_SHOWWINDOW, .wParam = 1, .lParam = 0},
+                                   });
+                state.message_queue.insert(state.message_queue.begin(), sw_messages.begin(), sw_messages.end());
             }
 
             if (c.win_emu.callbacks.on_generic_activity)
