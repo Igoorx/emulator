@@ -189,14 +189,16 @@ namespace sogen
             emulator_pointer guest_obj_addr{};
             EMU_WNDCLASSEX wnd_class{};
             CLSMENUNAME<EmulatorTraits<Emu64>> menu_name{};
+            DWORD flags{};
 
             class_entry() = default;
 
             class_entry(const emulator_pointer guest_obj, const EMU_WNDCLASSEX& wnd_class,
-                        const CLSMENUNAME<EmulatorTraits<Emu64>>& menu_name)
+                        const CLSMENUNAME<EmulatorTraits<Emu64>>& menu_name, const DWORD flags = 0)
                 : guest_obj_addr(guest_obj),
                   wnd_class(wnd_class),
-                  menu_name(menu_name)
+                  menu_name(menu_name),
+                  flags(flags)
             {
             }
         };

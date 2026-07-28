@@ -50,6 +50,8 @@ namespace sogen
     {
         hwnd handle{};
         hwnd parent_handle{};
+        uint64_t create_name_buffer{};
+        uint64_t create_class_buffer{};
 
         emulator_stack_allocation min_max_info_alloc{};
         emulator_stack_allocation window_rect_alloc{};
@@ -66,6 +68,8 @@ namespace sogen
         {
             buffer.write(this->handle);
             buffer.write(this->parent_handle);
+            buffer.write(this->create_name_buffer);
+            buffer.write(this->create_class_buffer);
             buffer.write(this->min_max_info_alloc);
             buffer.write(this->window_rect_alloc);
             buffer.write(this->create_struct_alloc);
@@ -80,6 +84,8 @@ namespace sogen
         {
             buffer.read(this->handle);
             buffer.read(this->parent_handle);
+            buffer.read(this->create_name_buffer);
+            buffer.read(this->create_class_buffer);
             buffer.read(this->min_max_info_alloc);
             buffer.read(this->window_rect_alloc);
             buffer.read(this->create_struct_alloc);
@@ -192,7 +198,7 @@ namespace sogen
     {
         hwnd window{};
         UINT message{};
-        uint64_t scratch_text{}; // guest buffer holding a re-encoded text payload; freed on completion
+        uint64_t scratch_text{};
         bool dispatching_result_callback{};
 
       private:
