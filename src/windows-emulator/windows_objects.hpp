@@ -704,9 +704,8 @@ namespace sogen
         uint64_t maximum_size{};
         uint32_t section_page_protection{};
         uint32_t allocation_attributes{};
-        // Shared backing for a pagefile-backed section: allocated once (lazily, on first map) and reused by
-        // every view, so all views of the section see the same memory and section offsets resolve correctly.
-        // 0 until allocated. Freed when last section handle is closed.
+        // Mapped views keep a section alive after its last handle closes. The current shared-view model has
+        // no independent view objects, so its backing remains allocated until process teardown.
         uint64_t backing_address{};
         std::optional<winpe::pe_image_basic_info> cached_image_info{};
 
