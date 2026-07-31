@@ -326,18 +326,31 @@ namespace sogen
     bool memory_manager::allocate_host_memory(const uint64_t address, const size_t size, void* host_pointer,
                                               const nt_memory_permission permissions)
     {
+        return this->allocate_host_memory(address, size, host_pointer, permissions, memory_region_kind::mmio, {});
+    }
+
+    bool memory_manager::allocate_host_memory(const uint64_t address, const size_t size, void* host_pointer,
+                                              const nt_memory_permission permissions, const memory_region_kind kind,
+                                              std::shared_ptr<void> host_backing)
+    {
         if (this->overlaps_reserved_region(address, size))
         {
             return false;
         }
 
         this->map_host_memory(address, size, host_pointer, this->get_effective_permissions(permissions));
+        if (host_backing &&
+            std::ranges::none_of(this->host_backings_, [&](const auto& existing) { return existing.get() == host_backing.get(); }))
+        {
+            this->host_backings_.push_back(std::move(host_backing));
+        }
 
         const auto entry = this->reserved_regions_
                                .try_emplace(address,
                                             reserved_region{
                                                 .length = size,
-                                                .kind = memory_region_kind::mmio,
+                                                .initial_permission = permissions,
+                                                .kind = kind,
                                             })
                                .first;
 
@@ -348,6 +361,34 @@ namespace sogen
 
         this->update_layout_version();
 
+        return true;
+    }
+
+    bool memory_manager::allocate_memory_alias(const uint64_t address, const uint64_t source, const size_t size,
+                                               const nt_memory_permission permissions, const memory_region_kind kind)
+    {
+        if (this->overlaps_reserved_region(address, size))
+        {
+            return false;
+        }
+
+        this->map_memory_alias(address, source, size, this->get_effective_permissions(permissions));
+
+        const auto entry = this->reserved_regions_
+                               .try_emplace(address,
+                                            reserved_region{
+                                                .length = size,
+                                                .initial_permission = permissions,
+                                                .kind = kind,
+                                            })
+                               .first;
+
+        entry->second.committed_regions[address] = committed_region{
+            .length = size,
+            .permissions = permissions,
+        };
+
+        this->update_layout_version();
         return true;
     }
 
@@ -983,6 +1024,12 @@ namespace sogen
         this->memory_->map_memory(address, size, permissions);
     }
 
+    void memory_manager::map_memory_alias(const uint64_t address, const uint64_t source, const size_t size,
+                                          const memory_permission permissions)
+    {
+        this->memory_->map_memory_alias(address, source, size, permissions);
+    }
+
     void memory_manager::map_host_memory(const uint64_t address, const size_t size, void* host_pointer, const memory_permission permissions)
     {
         this->memory_->map_host_memory(address, size, host_pointer, permissions);
@@ -991,6 +1038,16 @@ namespace sogen
     bool memory_manager::host_memory_aliasing_is_coherent() const
     {
         return this->memory_->host_memory_aliasing_is_coherent();
+    }
+
+    bool memory_manager::supports_host_memory_mapping() const
+    {
+        return this->memory_->supports_host_memory_mapping();
+    }
+
+    bool memory_manager::supports_memory_aliasing() const
+    {
+        return this->memory_->supports_memory_aliasing();
     }
 
     void memory_manager::flush_host_memory_cache(const void* host_pointer, const size_t size)

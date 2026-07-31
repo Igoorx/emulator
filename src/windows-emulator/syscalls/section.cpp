@@ -24,6 +24,26 @@ namespace sogen
             constexpr uint64_t k_base_static_server_data_win2019_time_zone_id_offset = 0xa70;
             constexpr uint32_t k_time_zone_id_invalid = 0xFFFFFFFF;
 
+            std::shared_ptr<uint8_t> allocate_page_aligned_backing(const size_t size)
+            {
+#ifdef OS_WINDOWS
+                auto* memory = static_cast<uint8_t*>(VirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+                if (!memory)
+                {
+                    return {};
+                }
+                return {memory, [](uint8_t* value) { VirtualFree(value, 0, MEM_RELEASE); }};
+#else
+                auto* memory = static_cast<uint8_t*>(std::aligned_alloc(0x1000, size));
+                if (!memory)
+                {
+                    return {};
+                }
+                std::memset(memory, 0, size);
+                return {memory, [](uint8_t* value) { std::free(value); }};
+#endif
+            }
+
             struct ini_file_mapping64
             {
                 uint64_t file_names;
@@ -466,9 +486,93 @@ namespace sogen
                     return STATUS_INVALID_PARAMETER;
                 }
 
+                const auto reserve_only = section_entry->allocation_attributes == SEC_RESERVE;
+                const auto aligned_offset = page_align_down(static_cast<uint64_t>(offset));
+                if (aligned_offset >= backing_size)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                const auto remaining_size = backing_size - static_cast<size_t>(aligned_offset);
+                const auto requested_size = view_size ? static_cast<size_t>(view_size.read()) : 0;
+                if (requested_size > remaining_size)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                const auto mapped_size = static_cast<size_t>(page_align_up(requested_size ? requested_size : remaining_size));
+                auto view_address = base_address.read();
+                if (!view_address)
+                {
+                    view_address = c.win_emu.memory.find_free_allocation_base(mapped_size);
+                }
+                else
+                {
+                    view_address = page_align_down(view_address);
+                }
+
+                if (!view_address)
+                {
+                    return STATUS_NO_MEMORY;
+                }
+
+                if (!reserve_only && section_entry->backing_address && !section_entry->host_backing)
+                {
+                    if (c.win_emu.memory.supports_memory_aliasing())
+                    {
+                        if (!c.win_emu.memory.allocate_memory_alias(view_address, section_entry->backing_address + aligned_offset,
+                                                                    mapped_size, protection, memory_region_kind::pagefile_section_view))
+                        {
+                            return STATUS_CONFLICTING_ADDRESSES;
+                        }
+
+                        base_address.write(view_address);
+                    }
+                    else
+                    {
+                        base_address.write(section_entry->backing_address + aligned_offset);
+                    }
+
+                    if (view_size)
+                    {
+                        view_size.write(requested_size ? requested_size : remaining_size);
+                    }
+                    return STATUS_SUCCESS;
+                }
+
+                if (c.win_emu.memory.supports_host_memory_mapping() && !reserve_only)
+                {
+                    if (!section_entry->host_backing)
+                    {
+                        section_entry->host_backing = allocate_page_aligned_backing(backing_size);
+                        if (!section_entry->host_backing)
+                        {
+                            return STATUS_NO_MEMORY;
+                        }
+                    }
+
+                    auto* host_view = section_entry->host_backing.get() + aligned_offset;
+                    if (!c.win_emu.memory.allocate_host_memory(view_address, mapped_size, host_view, protection,
+                                                               memory_region_kind::pagefile_section_view, section_entry->host_backing))
+                    {
+                        return STATUS_CONFLICTING_ADDRESSES;
+                    }
+
+                    if (!section_entry->backing_address)
+                    {
+                        section_entry->backing_address = view_address;
+                    }
+
+                    if (view_size)
+                    {
+                        view_size.write(requested_size ? requested_size : remaining_size);
+                    }
+                    base_address.write(view_address);
+                    return STATUS_SUCCESS;
+                }
+
                 if (section_entry->backing_address == 0)
                 {
-                    const auto reserve_only = section_entry->allocation_attributes == SEC_RESERVE;
                     const auto backing = c.win_emu.memory.allocate_memory(backing_size, protection, reserve_only, 0,
                                                                           memory_region_kind::pagefile_section_view);
                     if (!backing)
@@ -478,15 +582,9 @@ namespace sogen
                     section_entry->backing_address = backing;
                 }
 
-                const auto aligned_offset = page_align_down(static_cast<uint64_t>(offset));
-                if (aligned_offset >= backing_size)
-                {
-                    return STATUS_INVALID_PARAMETER;
-                }
-
                 if (view_size)
                 {
-                    view_size.write(backing_size - aligned_offset);
+                    view_size.write(requested_size ? requested_size : remaining_size);
                 }
                 base_address.write(section_entry->backing_address + aligned_offset);
                 return STATUS_SUCCESS;
@@ -682,9 +780,8 @@ namespace sogen
             const auto region_info = c.win_emu.memory.get_region_info(base_address);
             if (region_info.is_reserved && memory_region_policy::is_section_kind(region_info.kind))
             {
-                // A pagefile section keeps one persistent backing shared by every view, so unmapping a view
-                // must not free it while other views may still reference it.
-                if (region_info.kind == memory_region_kind::pagefile_section_view)
+                if (region_info.kind == memory_region_kind::pagefile_section_view && !c.win_emu.memory.supports_host_memory_mapping() &&
+                    !c.win_emu.memory.supports_memory_aliasing())
                 {
                     return STATUS_SUCCESS;
                 }

@@ -1271,6 +1271,11 @@ namespace sogen::kvm
                 this->rebuild_mappings();
             }
 
+            bool supports_host_memory_mapping() const override
+            {
+                return true;
+            }
+
             bool host_memory_aliasing_is_coherent() const override
             {
                 // KVM aliases the host pages into the guest as write-back cacheable, but a device sharing the

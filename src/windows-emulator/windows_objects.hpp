@@ -704,9 +704,10 @@ namespace sogen
         uint64_t maximum_size{};
         uint32_t section_page_protection{};
         uint32_t allocation_attributes{};
-        // Mapped views keep a section alive after its last handle closes. The current shared-view model has
-        // no independent view objects, so its backing remains allocated until process teardown.
+        // A nonzero backing_address with no host_backing identifies guest memory supplied by an emulated
+        // service. New views must alias that guest range rather than replace it with a generic section buffer.
         uint64_t backing_address{};
+        std::shared_ptr<uint8_t> host_backing{};
         std::optional<winpe::pe_image_basic_info> cached_image_info{};
 
         bool is_image() const

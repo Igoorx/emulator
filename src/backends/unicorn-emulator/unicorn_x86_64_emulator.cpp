@@ -387,6 +387,11 @@ namespace sogen::unicorn
                 uce(uc_mem_map_ptr(*this, address, size, static_cast<uint32_t>(permissions), host_pointer));
             }
 
+            bool supports_host_memory_mapping() const override
+            {
+                return true;
+            }
+
             void unmap_memory(const uint64_t address, const size_t size) override
             {
                 uce(uc_mem_unmap(*this, address, size));

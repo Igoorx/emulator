@@ -36,6 +36,11 @@ namespace sogen
         virtual void map_memory(uint64_t address, size_t size, memory_permission permissions) = 0;
         virtual void unmap_memory(uint64_t address, size_t size) = 0;
 
+        virtual void map_memory_alias(uint64_t /*address*/, uint64_t /*source*/, size_t /*size*/, memory_permission /*permissions*/)
+        {
+            throw std::runtime_error("Guest memory aliasing is not supported by this backend");
+        }
+
         virtual void map_host_memory(uint64_t /*address*/, size_t /*size*/, void* /*host_pointer*/, memory_permission /*permissions*/)
         {
             throw std::runtime_error("Host memory mapping is not supported by this backend");
@@ -51,6 +56,16 @@ namespace sogen
 
         virtual void flush_host_memory_cache(const void* /*host_pointer*/, size_t /*size*/)
         {
+        }
+
+        virtual bool supports_host_memory_mapping() const
+        {
+            return false;
+        }
+
+        virtual bool supports_memory_aliasing() const
+        {
+            return false;
         }
 
         template <typename T>
