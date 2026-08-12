@@ -110,9 +110,9 @@ namespace sogen
         void reset_host_memory_ranges();
 
         bool allocate_mmio(uint64_t address, size_t size, mmio_read_callback read_cb, mmio_write_callback write_cb);
-        // Reserves the range and aliases it onto caller-owned host memory (e.g. a host Vulkan mapping) so the
-        // guest accesses it coherently. The region is treated like MMIO: not serialized, host_pointer not owned.
-        bool allocate_host_memory(uint64_t address, size_t size, void* host_pointer, nt_memory_permission permissions);
+        // Chooses a compatible guest address and aliases it onto caller-owned host memory (e.g. a host Vulkan
+        // mapping). The region is treated like MMIO: not serialized, host_pointer not owned. Returns 0 on failure.
+        uint64_t allocate_host_memory(size_t size, void* host_pointer, nt_memory_permission permissions);
 
         // Backend coherency hooks for host-aliased memory (see memory_interface). Device emulation such as
         // the GPU bridge uses these to make guest writes visible to the host GPU on backends (e.g. KVM) that

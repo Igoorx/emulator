@@ -1,4 +1,4 @@
-# FEX-Emu (x86 -> AArch64 JIT). Built only when the FEX backend is enabled (ARM64 Linux/Darwin +
+# FEX-Emu (x86 -> AArch64 JIT). Built only when the FEX backend is enabled (ARM64 Linux/Darwin/Android +
 # Clang, resolved at the top level). FEX is not designed to be embedded via add_subdirectory: it
 # assumes it is the top-level project (~60 uses of CMAKE_SOURCE_DIR) and configures its whole
 # loader/tools tree. Instead build it standalone via ExternalProject and consume the resulting

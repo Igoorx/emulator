@@ -1,4 +1,4 @@
-// _GNU_SOURCE is required for mremap() (used to alias host memory into the guest address space).
+// _GNU_SOURCE exposes the Linux host VM and signal definitions used by this backend.
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -6,6 +6,8 @@
 #define FEX_EMULATOR_IMPL
 #include "fex_x86_64_emulator.hpp"
 #include "fex_x86_64_common.hpp"
+
+#include "address_utils.hpp"
 
 // FEX (https://fex-emu.com) is an in-process x86-64 -> AArch64 binary translator. Unlike the
 // Unicorn/Icicle/KVM backends it does not manage a sandboxed guest address space: the translated
@@ -15,12 +17,13 @@
 // hooks are accepted for API compatibility but never fire. Guest `syscall` instructions come back
 // through a FEXCore::HLE::SyscallHandler that invokes the registered syscall instruction hook.
 //
-// The functional target is Darwin on Apple Silicon; the signal handlers, MMIO fault emulation and
-// 16KB/4KB page reconciliation below are all Darwin-only. The AArch64 Linux path only has build
-// coverage, and Android is excluded by the CMake gate.
+// Darwin and Android install platform signal handlers for FEX's control-flow faults and direct MMIO.
+// The 16KB/4KB page reconciliation and MAP_JIT handling remain Darwin-only.
 
 #include <cstdlib>
+#include <signal.h>
 #include <sys/mman.h>
+#include <ucontext.h>
 #include <unistd.h>
 
 // Used unconditionally by the std::terminate handler in initialize_context(). Both platforms
@@ -32,13 +35,13 @@
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <mach/arm/thread_status.h>
-#include <signal.h>
 #include <pthread.h>
 #include <libkern/OSCacheControl.h>
 #include <libproc.h>
 #endif
 
 #include <atomic>
+#include <array>
 #include <bit>
 #include <cerrno>
 #include <cstring>
@@ -163,7 +166,9 @@ namespace sogen::fex
         {
             return (value + host_page_size_apple - 1) & ~(host_page_size_apple - 1);
         }
+#endif
 
+#if defined(__APPLE__) || defined(__ANDROID__)
         // Decodes only what an mmio_region fault needs: destination register, transfer size and
         // extension. The addressing mode is deliberately not decoded - the effective address is already
         // known, being the fault address itself under guest VA == host VA - so only the fields the
@@ -888,6 +893,53 @@ namespace sogen::fex
             }
         };
 #endif
+
+#ifdef __ANDROID__
+        fpsimd_context* find_fpsimd_context(ucontext_t* context)
+        {
+            auto* current = reinterpret_cast<_aarch64_ctx*>(context->uc_mcontext.__reserved);
+            const auto* end = context->uc_mcontext.__reserved + sizeof(context->uc_mcontext.__reserved);
+            while (reinterpret_cast<const uint8_t*>(current) + sizeof(*current) <= end && current->size >= sizeof(*current))
+            {
+                if (current->magic == FPSIMD_MAGIC && current->size >= sizeof(fpsimd_context))
+                {
+                    return reinterpret_cast<fpsimd_context*>(current);
+                }
+                current = reinterpret_cast<_aarch64_ctx*>(reinterpret_cast<uint8_t*>(current) + current->size);
+            }
+            return nullptr;
+        }
+
+        fex_x86_64_emulator* g_active_emulator = nullptr;
+
+        void fault_signal_handler(int sig, siginfo_t* info, void* raw_ucontext);
+
+        void install_fault_signal_handlers(fex_x86_64_emulator& emulator)
+        {
+            if (g_active_emulator != nullptr)
+            {
+                throw std::runtime_error("Only one FEX emulator instance can be active per process");
+            }
+
+            g_active_emulator = &emulator;
+
+            static std::array<std::byte, 64 * 1024> alt_stack;
+            stack_t stack{};
+            stack.ss_sp = alt_stack.data();
+            stack.ss_size = alt_stack.size();
+            ::sigaltstack(&stack, nullptr);
+
+            struct sigaction action = {};
+            action.sa_sigaction = fault_signal_handler;
+            action.sa_flags = SA_SIGINFO | SA_ONSTACK;
+            sigemptyset(&action.sa_mask);
+
+            ::sigaction(SIGSEGV, &action, nullptr);
+            ::sigaction(SIGBUS, &action, nullptr);
+            ::sigaction(SIGILL, &action, nullptr);
+            ::sigaction(SIGTRAP, &action, nullptr);
+        }
+#endif
     }
 
     class fex_x86_64_emulator;
@@ -940,10 +992,9 @@ namespace sogen::fex
 
             // Release everything we mmap'd into the (host == guest) address space.
 #ifdef __APPLE__
-            // All host mappings this backend owns are tracked as 16KB host pages (see
-            // mapped_host_pages_apple_), including PROT_NONE reservation claims that no regions_
-            // entry covers; map_host_memory aliases (owned=false) are never in this set. Darwin's
-            // munmap also requires host-page alignment, which regions_ entries don't guarantee.
+            // All mappings this backend must tear down are tracked as 16KB host pages (see
+            // mapped_host_pages_apple_), including PROT_NONE reservation claims and map_host_memory
+            // aliases. Darwin's munmap also requires host-page alignment, which regions_ entries don't guarantee.
             for (const auto host_page : this->mapped_host_pages_apple_)
             {
                 ::munmap(reinterpret_cast<void*>(host_page), host_page_size_apple);
@@ -960,6 +1011,13 @@ namespace sogen::fex
                 {
                     ::munmap(reinterpret_cast<void*>(address), region.size);
                 }
+            }
+#endif
+
+#ifdef __ANDROID__
+            if (g_active_emulator == this)
+            {
+                g_active_emulator = nullptr;
             }
 #endif
 
@@ -1009,7 +1067,7 @@ namespace sogen::fex
 
             // ExecuteThread runs the translated guest until the thread is asked to stop (which the
             // syscall bridge does when a hook calls stop()), or the guest faults/exits.
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__ANDROID__)
             // Here it can also return early because handle_fault_signal deferred a hook dispatch (see
             // pending_fault_dispatch_) rather than genuinely stopping - dispatch it in normal call
             // context, where that is safe, then resume by calling ExecuteThread again; it always
@@ -1194,6 +1252,15 @@ namespace sogen::fex
             state.L1Mask = l1_mask;
             this->ensure_callret_buffer(state);
             thread->CallRetStackBase = reinterpret_cast<void*>(state._pad1);
+
+            auto& generation = this->callret_buffer_generations_.at(state._pad1);
+            if (generation != thread->CodeBufferGeneration)
+            {
+                constexpr size_t callret_stack_size = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
+                FEXCore::Allocator::VirtualDontNeed(thread->CallRetStackBase, callret_stack_size);
+                state.callret_sp = state._pad1 + callret_stack_size / 4;
+                generation = thread->CodeBufferGeneration;
+            }
         }
 
         void restore_registers(const std::vector<std::byte>& register_data) override
@@ -1606,7 +1673,6 @@ namespace sogen::fex
 
         void map_mmio(uint64_t address, size_t size, mmio_read_callback read_cb, mmio_write_callback /*write_cb*/) override
         {
-            // See mmio_region's doc comment - the region stays unmapped so accesses fault and emulate.
             if (!is_page_aligned(address) || !is_page_aligned(size))
             {
                 throw std::runtime_error("FEX MMIO mappings must be page aligned");
@@ -1709,9 +1775,8 @@ namespace sogen::fex
             const uint64_t host_address = address;
 
 #ifdef __APPLE__
-            // Darwin has no mremap(); mach_vm_remap() is the Mach equivalent. VM_FLAGS_OVERWRITE
-            // replaces whatever reservation the memory manager already put there, matching
-            // mmap(MAP_FIXED); copy=FALSE aliases rather than duplicates, matching MREMAP_MAYMOVE.
+            // VM_FLAGS_OVERWRITE replaces the reservation the memory manager put at the target;
+            // copy=FALSE creates a second mapping of the caller-owned pages rather than copying them.
             mach_vm_address_t target_address = host_address;
             vm_prot_t cur_protection = VM_PROT_NONE;
             vm_prot_t max_protection = VM_PROT_NONE;
@@ -1722,13 +1787,17 @@ namespace sogen::fex
             {
                 throw std::runtime_error("FEX backend failed to alias host memory into the guest");
             }
-#else
-            // Move the existing host mapping so the guest sees it at `address` without a staging copy.
-            // mremap with MREMAP_FIXED relocates the VMA; the caller must treat host_pointer as moved.
-            void* result = ::mremap(host_pointer, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, reinterpret_cast<void*>(host_address));
-            if (result == MAP_FAILED || reinterpret_cast<uint64_t>(result) != host_address)
+
+            const uint64_t host_page_start = host_page_align_down_apple(host_address);
+            const uint64_t host_page_end = host_page_align_up_apple(host_address + size);
+            for (uint64_t host_page = host_page_start; host_page < host_page_end; host_page += host_page_size_apple)
             {
-                throw std::runtime_error("FEX backend failed to alias host memory into the guest");
+                this->mapped_host_pages_apple_.insert(host_page);
+            }
+#else
+            if (host_address != get_untagged_pointer_address(host_pointer))
+            {
+                throw std::runtime_error("FEX host memory mappings must retain their host address on Linux");
             }
 #endif
 
@@ -1741,12 +1810,23 @@ namespace sogen::fex
 
         bool host_memory_aliasing_is_coherent() const override
         {
+#ifdef __ANDROID__
+            return true;
+#else
             // Apple Silicon's unified memory makes CPU/GPU coherency for the Metal buffers behind
             // MoltenVK's Vulkan buffers likely, but it is not guaranteed across every Metal storage
             // mode this bridge might use. An unnecessary flush is a harmless no-op, whereas wrongly
             // claiming coherence surfaces as rendering corruption.
             return false;
+#endif
         }
+
+#ifndef __APPLE__
+        bool host_memory_mapping_requires_identity() const override
+        {
+            return true;
+        }
+#endif
 
         void flush_host_memory_cache(const void* host_pointer, size_t size) override
         {
@@ -1786,7 +1866,20 @@ namespace sogen::fex
             this->set_shadow_range_apple(address, size, std::nullopt);
             this->sync_host_pages_covering_apple(address, size);
 #else
-            ::munmap(reinterpret_cast<void*>(address), size);
+            auto region = this->regions_.upper_bound(address);
+            bool unmap = true;
+            if (region != this->regions_.begin())
+            {
+                --region;
+                if (region->first + region->second.size > address)
+                {
+                    unmap = region->second.owned;
+                }
+            }
+            if (unmap)
+            {
+                ::munmap(reinterpret_cast<void*>(address), size);
+            }
 #endif
             this->invalidate_code_range(address, size);
             this->erase_region_range(address, size);
@@ -2213,7 +2306,7 @@ namespace sogen::fex
 
             this->context_->InitCore();
 
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__ANDROID__)
             install_fault_signal_handlers(*this);
 #endif
         }
@@ -2786,6 +2879,333 @@ namespace sogen::fex
             this->defer_hook_dispatch(uctx, dispatch, /*sra_already_spilled=*/true);
             return true;
         }
+#elif defined(__ANDROID__)
+      public:
+        static bool complete_decoded_load(ucontext_t* context, const decoded_arm64_load& decoded, const void* data, uint64_t pc)
+        {
+            if (decoded.is_vector)
+            {
+                auto* fpsimd = find_fpsimd_context(context);
+                if (fpsimd == nullptr)
+                {
+                    return false;
+                }
+
+                __uint128_t value{};
+                std::memcpy(&value, data, sizeof(value));
+                fpsimd->vregs[decoded.rt] = value;
+                context->uc_mcontext.pc = pc + 4;
+                return true;
+            }
+
+            uint64_t raw_value = 0;
+            std::memcpy(&raw_value, data, decoded.size);
+
+            uint64_t result = 0;
+            switch (decoded.size)
+            {
+            case 1:
+                result = decoded.sign_extend ? static_cast<uint64_t>(static_cast<int64_t>(static_cast<int8_t>(raw_value)))
+                                             : (raw_value & 0xFFULL);
+                break;
+            case 2:
+                result = decoded.sign_extend ? static_cast<uint64_t>(static_cast<int64_t>(static_cast<int16_t>(raw_value)))
+                                             : (raw_value & 0xFFFFULL);
+                break;
+            case 4:
+                result = decoded.sign_extend ? static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(raw_value)))
+                                             : (raw_value & 0xFFFFFFFFULL);
+                break;
+            default:
+                result = raw_value;
+                break;
+            }
+
+            if (!decoded.dest_is_64bit)
+            {
+                result &= 0xFFFFFFFFULL;
+            }
+
+            if (decoded.rt < 31)
+            {
+                context->uc_mcontext.regs[decoded.rt] = result;
+            }
+            context->uc_mcontext.pc = pc + 4;
+            return true;
+        }
+
+        bool handle_mmio_fault(ucontext_t* context, const mmio_region& region, uint64_t fault_address)
+        {
+            const uint64_t pc = context->uc_mcontext.pc;
+            const auto decoded = decode_arm64_load(*reinterpret_cast<const uint32_t*>(pc));
+            if (!decoded)
+            {
+                return false;
+            }
+
+            alignas(16) std::array<std::byte, 16> buffer{};
+            region.read_cb(fault_address - region.address, buffer.data(), decoded->size);
+            return complete_decoded_load(context, *decoded, buffer.data(), pc);
+        }
+
+        bool handle_misaligned_atomic_fault(ucontext_t* context, uint64_t fault_address)
+        {
+            const uint64_t pc = context->uc_mcontext.pc;
+            const auto instruction = *reinterpret_cast<const uint32_t*>(pc);
+
+            if (const auto load = decode_arm64_load(instruction))
+            {
+                return complete_decoded_load(context, *load, reinterpret_cast<const void*>(fault_address), pc);
+            }
+
+            if (const auto store = decode_arm64_store(instruction))
+            {
+                const uint64_t value = store->rt < 31 ? context->uc_mcontext.regs[store->rt] : 0;
+                std::memcpy(reinterpret_cast<void*>(fault_address), &value, store->size);
+                context->uc_mcontext.pc = pc + 4;
+                return true;
+            }
+
+            return false;
+        }
+
+        enum class pending_fault_kind
+        {
+            none,
+            memory_violation,
+            interrupt,
+        };
+
+        struct pending_fault_dispatch
+        {
+            pending_fault_kind kind = pending_fault_kind::none;
+            uint64_t address = 0;
+            size_t size = 0;
+            memory_operation operation{};
+            memory_violation_type type{};
+            int vector = 0;
+        };
+
+        bool dispatch_pending_hook_if_any()
+        {
+            const pending_fault_dispatch dispatch = this->pending_fault_dispatch_;
+            this->pending_fault_dispatch_.kind = pending_fault_kind::none;
+
+            switch (dispatch.kind)
+            {
+            case pending_fault_kind::memory_violation:
+                for (auto& [_, hook] : this->memory_violation_hooks_)
+                {
+                    hook(*this, dispatch.address, dispatch.size, dispatch.operation, dispatch.type);
+                }
+                return true;
+            case pending_fault_kind::interrupt:
+                for (auto& [_, hook] : this->interrupt_hooks_)
+                {
+                    hook(*this, dispatch.vector);
+                }
+                return true;
+            case pending_fault_kind::none:
+            default:
+                return false;
+            }
+        }
+
+        void defer_hook_dispatch(ucontext_t* context, const pending_fault_dispatch& dispatch, bool state_already_spilled)
+        {
+            this->pending_fault_dispatch_ = dispatch;
+            const auto& config = this->signal_delegator_->GetConfig();
+            context->uc_mcontext.pc = state_already_spilled ? config.ThreadStopHandlerAddress : config.ThreadStopHandlerAddressSpillSRA;
+        }
+
+        bool host_pc_in_dispatcher(uint64_t pc) const
+        {
+            if (this->signal_delegator_ == nullptr)
+            {
+                return false;
+            }
+            const auto& config = this->signal_delegator_->GetConfig();
+            return pc >= config.DispatcherBegin && pc < config.DispatcherEnd;
+        }
+
+        bool handle_callret_stack_fault(ucontext_t* context, uint64_t fault_address) const
+        {
+            if (this->thread_ == nullptr || this->thread_->CallRetStackBase == nullptr)
+            {
+                return false;
+            }
+
+            const auto base = reinterpret_cast<uint64_t>(this->thread_->CallRetStackBase);
+            const auto host_page = static_cast<uint64_t>(::getpagesize());
+            constexpr uint64_t callret_stack_size = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
+            if (fault_address < base - host_page || fault_address >= base + callret_stack_size + host_page)
+            {
+                return false;
+            }
+
+            context->uc_mcontext.regs[25] = base + callret_stack_size / 4;
+            return true;
+        }
+
+        memory_permission permissions_at(uint64_t address) const
+        {
+            auto it = this->regions_.upper_bound(address);
+            if (it == this->regions_.begin())
+            {
+                return memory_permission::none;
+            }
+            --it;
+            return address < it->first + it->second.size ? it->second.permissions : memory_permission::none;
+        }
+
+        bool handle_general_memory_violation(ucontext_t* context, uint64_t fault_address)
+        {
+            const uint64_t pc = context->uc_mcontext.pc;
+            const auto permissions = this->permissions_at(fault_address);
+
+            memory_operation operation = memory_operation::exec;
+            if (fault_address != pc)
+            {
+                const auto instruction = *reinterpret_cast<const uint32_t*>(pc);
+                operation = decode_arm64_store(instruction) ? memory_operation::write : memory_operation::read;
+            }
+
+            if ((permissions & operation) == operation)
+            {
+                return this->handle_misaligned_atomic_fault(context, fault_address);
+            }
+
+            if (const uint64_t guest_rip = this->context_->RestoreRIPFromHostPC(this->thread_, pc))
+            {
+                this->thread_->CurrentFrame->State.rip = guest_rip;
+            }
+
+            pending_fault_dispatch dispatch{};
+            dispatch.kind = pending_fault_kind::memory_violation;
+            dispatch.address = fault_address;
+            dispatch.size = 1;
+            dispatch.operation = operation;
+            dispatch.type = permissions == memory_permission::none ? memory_violation_type::unmapped : memory_violation_type::protection;
+            this->defer_hook_dispatch(context, dispatch, false);
+            return true;
+        }
+
+        bool handle_fault_signal(int sig, siginfo_t* info, void* raw_context)
+        {
+            if (this->thread_ == nullptr)
+            {
+                return false;
+            }
+
+            auto* context = static_cast<ucontext_t*>(raw_context);
+            const uint64_t pc = context->uc_mcontext.pc;
+            const auto fault_address = reinterpret_cast<uint64_t>(info->si_addr);
+
+            if (sig == SIGSEGV || sig == SIGBUS)
+            {
+                const uint64_t interrupt_page = get_untagged_pointer_address(this->thread_->InterruptFaultPage);
+                if (fault_address >= interrupt_page && fault_address < interrupt_page + sizeof(this->thread_->InterruptFaultPage))
+                {
+                    const bool in_jit = this->context_->IsAddressInCodeBuffer(this->thread_, pc);
+                    const bool epilogue_byte_store = (*reinterpret_cast<const uint32_t*>(pc) & 0xFFC00000u) == 0x39000000u;
+                    if (in_jit && !epilogue_byte_store)
+                    {
+                        this->thread_->CurrentFrame->State.rip = this->context_->RestoreRIPFromHostPC(this->thread_, pc);
+                        this->interrupt_page_unwind_ = true;
+                        context->uc_mcontext.pc = this->signal_delegator_->GetConfig().ThreadStopHandlerAddressSpillSRA;
+                        return true;
+                    }
+
+                    context->uc_mcontext.pc = pc + 4;
+                    return true;
+                }
+
+                if (this->handle_callret_stack_fault(context, fault_address))
+                {
+                    return true;
+                }
+
+                if (fault_address != pc)
+                {
+                    for (const auto& region : this->mmio_regions_)
+                    {
+                        if (fault_address >= region.address && fault_address < region.address + region.size)
+                        {
+                            return this->handle_mmio_fault(context, region, fault_address);
+                        }
+                    }
+                }
+
+                const auto guard_page = this->thread_->JITGuardPage;
+                if (guard_page != 0 && fault_address >= guard_page && fault_address < guard_page + FEXCore::Utils::FEX_HOST_PAGE_SIZE)
+                {
+                    auto* fpsimd = find_fpsimd_context(context);
+                    if (fpsimd == nullptr)
+                    {
+                        return false;
+                    }
+                    FEXCore::UncheckedLongJump::ManuallyLoadJumpBuf(this->thread_->RestartJump, this->thread_->JITGuardOverflowArgument,
+                                                                    reinterpret_cast<uint64_t*>(context->uc_mcontext.regs), fpsimd->vregs,
+                                                                    reinterpret_cast<uint64_t*>(&context->uc_mcontext.pc));
+                    return true;
+                }
+            }
+
+            if (!this->host_pc_in_dispatcher(pc))
+            {
+                if ((sig == SIGSEGV || sig == SIGBUS) && this->context_->IsAddressInCodeBuffer(this->thread_, pc))
+                {
+                    return this->handle_general_memory_violation(context, fault_address);
+                }
+                return false;
+            }
+
+            auto* frame = this->thread_->CurrentFrame;
+            if (!frame->SynchronousFaultData.FaultToTopAndGeneratedException)
+            {
+                return false;
+            }
+
+            auto vector = static_cast<int>(frame->SynchronousFaultData.TrapNo);
+            constexpr int gp_fault_vector = 13;
+            constexpr uint32_t idt_reference_bit = 0x2;
+            if (vector == gp_fault_vector && (frame->SynchronousFaultData.err_code & idt_reference_bit) != 0)
+            {
+                vector = static_cast<int>(frame->SynchronousFaultData.err_code >> 3);
+            }
+            frame->SynchronousFaultData.FaultToTopAndGeneratedException = false;
+
+            pending_fault_dispatch dispatch{};
+            if (vector == 14)
+            {
+                const auto error_code = frame->SynchronousFaultData.err_code;
+                dispatch.kind = pending_fault_kind::memory_violation;
+                dispatch.address = frame->State.rip;
+                dispatch.size = 1;
+                dispatch.operation = memory_operation::read;
+                if ((error_code & 0x10) != 0)
+                {
+                    dispatch.operation = memory_operation::exec;
+                }
+                else if ((error_code & 0x2) != 0)
+                {
+                    dispatch.operation = memory_operation::write;
+                }
+                dispatch.type = (error_code & 0x1) != 0 ? memory_violation_type::protection : memory_violation_type::unmapped;
+            }
+            else
+            {
+                if (frame->SynchronousFaultData.TrapNo == FEXCore::X86State::X86_TRAPNO_BP)
+                {
+                    frame->State.rip -= 1;
+                }
+                dispatch.kind = pending_fault_kind::interrupt;
+                dispatch.vector = vector;
+            }
+
+            this->defer_hook_dispatch(context, dispatch, true);
+            return true;
+        }
 #endif
 
       private:
@@ -2849,6 +3269,7 @@ namespace sogen::fex
                 state.callret_sp = reinterpret_cast<uint64_t>(callret_stack_base) + callret_stack_size / 4;
 
                 this->callret_buffers_.emplace_back(alloc_base, callret_alloc_size);
+                this->callret_buffer_generations_.emplace(state._pad1, this->thread_->CodeBufferGeneration);
             }
         }
 
@@ -3035,7 +3456,7 @@ namespace sogen::fex
         std::atomic<bool> stop_requested_{false};
         uintptr_t next_hook_id_ = 1;
 
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__ANDROID__)
         pending_fault_dispatch pending_fault_dispatch_{};
         // Set by handle_fault_signal on an InterruptFaultPage unwind, consumed by start()'s loop to tell
         // it apart from any other clean return. Atomic even though both ends are the same thread: the
@@ -3051,6 +3472,7 @@ namespace sogen::fex
         // destructor can release them - these live outside regions_ (host allocator space, not the
         // guest address space) and outlive any individual CPUState snapshot they were allocated for.
         std::vector<std::pair<void*, size_t>> callret_buffers_;
+        std::unordered_map<uint64_t, uint64_t> callret_buffer_generations_;
 
 #ifdef __APPLE__
         // Apple Silicon's 16KB host page is coarser than the guest's 4KB architectural page, so one host
@@ -3073,7 +3495,7 @@ namespace sogen::fex
         std::unordered_map<emulator_hook*, basic_block_hook_callback> basic_block_hooks_;
     };
 
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__ANDROID__)
     namespace
     {
         void fault_signal_handler(int sig, siginfo_t* info, void* raw_ucontext)
@@ -3088,7 +3510,11 @@ namespace sogen::fex
 
             // stdio is not async-signal-safe; snprintf into a fixed stack buffer plus a single write(2).
             char buf[160];
+#ifdef __APPLE__
             const uint64_t pc = arm_thread_state64_get_pc(uctx->uc_mcontext->__ss);
+#else
+            const uint64_t pc = uctx->uc_mcontext.pc;
+#endif
             const int len = snprintf(buf, sizeof(buf), "[FEX backend] unhandled signal %d si_code=%d at pc=0x%llx fault_addr=%p\n", sig,
                                      info->si_code, static_cast<unsigned long long>(pc), info->si_addr);
             if (len > 0)
