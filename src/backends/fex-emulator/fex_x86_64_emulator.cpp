@@ -309,19 +309,13 @@ namespace sogen::fex
         }
 
         // Store-release forms (STLR/STLRB/STLRH), the counterpart to decode_arm64_load's LDAR/LDAPR
-        // handling. Used only by handle_fault_signal's misaligned-atomic fallback; mmio_region's only
+        // handling. Kept for the misaligned-atomic/false-fault emulation paths; mmio_region's only
         // consumer here is read-only.
         //
-        // Deliberately narrow: broadening to plain STR/STUR for handle_general_memory_violation's
-        // Category-3 false-fault case causes a reproducible hang isolated to this table (root cause not
-        // yet understood; decode_arm64_load's equivalent plain-load coverage is safe).
-        //
-        // Known consequence: handle_general_memory_violation also uses this decoder to classify a fault
-        // as read vs. write on the protection-violation path, so a plain STR to read-only memory is
-        // misclassified as a read and surfaces as an unhandled host signal instead of a guest
-        // STATUS_ACCESS_VIOLATION - hit by any guest writing to read-only memory and catching the
-        // exception (packers, DRM). A plain store to unmapped memory does reach the guest, but with
-        // ExceptionInformation[0] wrongly saying read.
+        // Deliberately narrow: broadening this emulation decoder to plain STR/STUR causes a reproducible
+        // hang isolated to this table (root cause not yet understood; decode_arm64_load's equivalent
+        // plain-load coverage is safe). Real Android protection-fault read/write classification uses the
+        // kernel's ESR WnR bit instead and therefore does not require broadening this decoder.
         struct decoded_arm64_store
         {
             uint32_t size = 0; // bytes: 1, 2, 4, 8
@@ -895,15 +889,16 @@ namespace sogen::fex
 #endif
 
 #ifdef __ANDROID__
-        fpsimd_context* find_fpsimd_context(ucontext_t* context)
+        template <typename Context>
+        Context* find_aarch64_context(ucontext_t* context, uint32_t magic)
         {
             auto* current = reinterpret_cast<_aarch64_ctx*>(context->uc_mcontext.__reserved);
             const auto* end = context->uc_mcontext.__reserved + sizeof(context->uc_mcontext.__reserved);
             while (reinterpret_cast<const uint8_t*>(current) + sizeof(*current) <= end && current->size >= sizeof(*current))
             {
-                if (current->magic == FPSIMD_MAGIC && current->size >= sizeof(fpsimd_context))
+                if (current->magic == magic && current->size >= sizeof(Context))
                 {
-                    return reinterpret_cast<fpsimd_context*>(current);
+                    return reinterpret_cast<Context*>(current);
                 }
                 current = reinterpret_cast<_aarch64_ctx*>(reinterpret_cast<uint8_t*>(current) + current->size);
             }
@@ -914,6 +909,103 @@ namespace sogen::fex
 
         void fault_signal_handler(int sig, siginfo_t* info, void* raw_ucontext);
 
+        constexpr std::array<int, 4> fault_signals = {SIGSEGV, SIGBUS, SIGILL, SIGTRAP};
+        std::array<struct sigaction, fault_signals.size()> previous_fault_signal_actions{};
+        stack_t previous_fault_alt_stack{};
+        std::array<std::byte, 64 * 1024> fault_alt_stack{};
+
+        void uninstall_fault_signal_handlers(fex_x86_64_emulator& emulator) noexcept
+        {
+            if (g_active_emulator != &emulator)
+            {
+                return;
+            }
+
+            // Stop routing new faults to this object before changing any process-global disposition.
+            g_active_emulator = nullptr;
+
+            // Do not overwrite an embedding application that deliberately replaced one of our handlers
+            // while the backend was alive; only restore entries that are still ours.
+            for (size_t i = 0; i < fault_signals.size(); ++i)
+            {
+                struct sigaction current{};
+                if (::sigaction(fault_signals[i], nullptr, &current) == 0 && (current.sa_flags & SA_SIGINFO) != 0 &&
+                    current.sa_sigaction == fault_signal_handler)
+                {
+                    ::sigaction(fault_signals[i], &previous_fault_signal_actions[i], nullptr);
+                }
+            }
+
+            stack_t current_stack{};
+            if (::sigaltstack(nullptr, &current_stack) == 0 && (current_stack.ss_flags & SS_DISABLE) == 0 &&
+                current_stack.ss_sp == fault_alt_stack.data() && current_stack.ss_size == fault_alt_stack.size())
+            {
+                ::sigaltstack(&previous_fault_alt_stack, nullptr);
+            }
+        }
+
+        void dispatch_previous_fault_signal_action(int sig, siginfo_t* info, void* raw_ucontext)
+        {
+            size_t signal_index = 0;
+            while (signal_index < fault_signals.size() && fault_signals[signal_index] != sig)
+            {
+                ++signal_index;
+            }
+            if (signal_index == fault_signals.size())
+            {
+                return;
+            }
+
+            auto& saved_action = previous_fault_signal_actions[signal_index];
+            const struct sigaction action = saved_action;
+            if (action.sa_handler == SIG_IGN)
+            {
+                return;
+            }
+            if (action.sa_handler == SIG_DFL)
+            {
+                ::sigaction(sig, &action, nullptr);
+                ::raise(sig);
+                return;
+            }
+
+            // SA_RESETHAND takes effect before invoking the application handler. Keep the saved action
+            // in sync while leaving FEX's own kernel disposition installed for subsequent translated
+            // faults if the application handler returns.
+            if ((action.sa_flags & SA_RESETHAND) != 0)
+            {
+                struct sigaction default_action{};
+                default_action.sa_handler = SIG_DFL;
+                sigemptyset(&default_action.sa_mask);
+                saved_action = default_action;
+            }
+
+            sigset_t old_mask{};
+            const bool have_old_mask = ::sigprocmask(SIG_SETMASK, nullptr, &old_mask) == 0;
+            ::sigprocmask(SIG_BLOCK, &action.sa_mask, nullptr);
+            if ((action.sa_flags & SA_NODEFER) != 0 && ::sigismember(&action.sa_mask, sig) == 0)
+            {
+                sigset_t signal_mask{};
+                sigemptyset(&signal_mask);
+                sigaddset(&signal_mask, sig);
+                ::sigprocmask(SIG_UNBLOCK, &signal_mask, nullptr);
+            }
+
+            if ((action.sa_flags & SA_SIGINFO) != 0)
+            {
+                action.sa_sigaction(sig, info, raw_ucontext);
+            }
+            else
+            {
+                action.sa_handler(sig);
+            }
+
+            if (have_old_mask)
+            {
+                ::sigprocmask(SIG_SETMASK, &old_mask, nullptr);
+            }
+        }
+
         void install_fault_signal_handlers(fex_x86_64_emulator& emulator)
         {
             if (g_active_emulator != nullptr)
@@ -921,23 +1013,60 @@ namespace sogen::fex
                 throw std::runtime_error("Only one FEX emulator instance can be active per process");
             }
 
-            g_active_emulator = &emulator;
+            // Capture every process-global value before mutating any of them, so a setup failure cannot
+            // strand a mixture of application and FEX dispositions.
+            if (::sigaltstack(nullptr, &previous_fault_alt_stack) != 0)
+            {
+                throw std::runtime_error("FEX backend failed to query the Android alternate signal stack");
+            }
+            for (size_t i = 0; i < fault_signals.size(); ++i)
+            {
+                if (::sigaction(fault_signals[i], nullptr, &previous_fault_signal_actions[i]) != 0)
+                {
+                    throw std::runtime_error("FEX backend failed to query an Android fault signal action");
+                }
+            }
 
-            static std::array<std::byte, 64 * 1024> alt_stack;
             stack_t stack{};
-            stack.ss_sp = alt_stack.data();
-            stack.ss_size = alt_stack.size();
-            ::sigaltstack(&stack, nullptr);
+            stack.ss_sp = fault_alt_stack.data();
+            stack.ss_size = fault_alt_stack.size();
+            if (::sigaltstack(&stack, nullptr) != 0)
+            {
+                throw std::runtime_error("FEX backend failed to install the Android alternate signal stack");
+            }
 
-            struct sigaction action = {};
+            struct sigaction action{};
             action.sa_sigaction = fault_signal_handler;
-            action.sa_flags = SA_SIGINFO | SA_ONSTACK;
             sigemptyset(&action.sa_mask);
 
-            ::sigaction(SIGSEGV, &action, nullptr);
-            ::sigaction(SIGBUS, &action, nullptr);
-            ::sigaction(SIGILL, &action, nullptr);
-            ::sigaction(SIGTRAP, &action, nullptr);
+            size_t installed_signal_count = 0;
+            for (; installed_signal_count < fault_signals.size(); ++installed_signal_count)
+            {
+                // SA_RESTART affects the interrupted host operation after our handler returns, so carry
+                // it through from the embedding application's disposition. The other handler-control
+                // flags are reproduced explicitly when an unhandled signal is chained below.
+                action.sa_flags = SA_SIGINFO | SA_ONSTACK | (previous_fault_signal_actions[installed_signal_count].sa_flags & SA_RESTART);
+                if (::sigaction(fault_signals[installed_signal_count], &action, nullptr) != 0)
+                {
+                    bool restored = true;
+                    for (size_t i = installed_signal_count; i > 0; --i)
+                    {
+                        restored &= ::sigaction(fault_signals[i - 1], &previous_fault_signal_actions[i - 1], nullptr) == 0;
+                    }
+                    restored &= ::sigaltstack(&previous_fault_alt_stack, nullptr) == 0;
+                    if (!restored)
+                    {
+                        // Do not report a recoverable constructor failure while leaving partial
+                        // process-global signal state installed.
+                        std::terminate();
+                    }
+                    throw std::runtime_error("FEX backend failed to install an Android fault signal action");
+                }
+            }
+
+            // Publish the active object only after setup is complete. Until this point, any handler that
+            // happens to run chains to the previously captured application disposition instead.
+            g_active_emulator = &emulator;
         }
 #endif
     }
@@ -968,6 +1097,13 @@ namespace sogen::fex
 
     class fex_x86_64_emulator final : public x86_64_emulator
     {
+        struct callret_buffer_record
+        {
+            void* allocation_base = nullptr;
+            size_t allocation_size = 0;
+            uint64_t code_buffer_generation = 0;
+        };
+
       public:
         fex_x86_64_emulator()
         {
@@ -1015,18 +1151,15 @@ namespace sogen::fex
 #endif
 
 #ifdef __ANDROID__
-            if (g_active_emulator == this)
-            {
-                g_active_emulator = nullptr;
-            }
+            uninstall_fault_signal_handlers(*this);
 #endif
 
             // Per-logical-thread call-ret buffers (see ensure_callret_buffer) live in host allocator
             // space, not regions_, and are never freed as individual guest threads exit - release them
             // all here so they don't outlive this emulator instance.
-            for (const auto& [alloc_base, alloc_size] : this->callret_buffers_)
+            for (const auto& [_, buffer] : this->callret_buffers_)
             {
-                FEXCore::Allocator::munmap(alloc_base, alloc_size);
+                FEXCore::Allocator::munmap(buffer.allocation_base, buffer.allocation_size);
             }
         }
 
@@ -1253,13 +1386,13 @@ namespace sogen::fex
             this->ensure_callret_buffer(state);
             thread->CallRetStackBase = reinterpret_cast<void*>(state._pad1);
 
-            auto& generation = this->callret_buffer_generations_.at(state._pad1);
-            if (generation != thread->CodeBufferGeneration)
+            auto& buffer = this->callret_buffers_.at(state._pad1);
+            if (buffer.code_buffer_generation != thread->CodeBufferGeneration)
             {
                 constexpr size_t callret_stack_size = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
                 FEXCore::Allocator::VirtualDontNeed(thread->CallRetStackBase, callret_stack_size);
                 state.callret_sp = state._pad1 + callret_stack_size / 4;
-                generation = thread->CodeBufferGeneration;
+                buffer.code_buffer_generation = thread->CodeBufferGeneration;
             }
         }
 
@@ -1866,16 +1999,8 @@ namespace sogen::fex
             this->set_shadow_range_apple(address, size, std::nullopt);
             this->sync_host_pages_covering_apple(address, size);
 #else
-            auto region = this->regions_.upper_bound(address);
-            bool unmap = true;
-            if (region != this->regions_.begin())
-            {
-                --region;
-                if (region->first + region->second.size > address)
-                {
-                    unmap = region->second.owned;
-                }
-            }
+            const auto region = this->find_region_containing(address);
+            const bool unmap = region == this->regions_.end() || region->second.owned;
             if (unmap)
             {
                 ::munmap(reinterpret_cast<void*>(address), size);
@@ -1906,6 +2031,19 @@ namespace sogen::fex
 
         // region bookkeeping
 
+        // Returns the region that contains address, not merely its predecessor in the ordered map.
+        auto find_region_containing(uint64_t address) const
+        {
+            auto it = this->regions_.upper_bound(address);
+            if (it == this->regions_.begin())
+            {
+                return this->regions_.end();
+            }
+
+            --it;
+            return address < it->first + it->second.size ? it : this->regions_.end();
+        }
+
         // Callers are expected to have checked is_range_mapped already.
         bool range_is_writable(uint64_t address, size_t size) const
         {
@@ -1914,20 +2052,13 @@ namespace sogen::fex
 
             while (cursor < end)
             {
-                auto it = this->regions_.upper_bound(cursor);
-                if (it == this->regions_.begin())
+                const auto it = this->find_region_containing(cursor);
+                if (it == this->regions_.end() || (it->second.permissions & memory_permission::write) == memory_permission::none)
                 {
                     return false;
                 }
-                --it;
 
-                const uint64_t region_end = it->first + it->second.size;
-                if (cursor < it->first || cursor >= region_end ||
-                    (it->second.permissions & memory_permission::write) == memory_permission::none)
-                {
-                    return false;
-                }
-                cursor = region_end;
+                cursor = it->first + it->second.size;
             }
 
             return true;
@@ -2105,19 +2236,12 @@ namespace sogen::fex
             // non-overlapping, so a simple forward walk suffices.
             while (cursor < end)
             {
-                auto it = this->regions_.upper_bound(cursor);
-                if (it == this->regions_.begin())
+                const auto it = this->find_region_containing(cursor);
+                if (it == this->regions_.end())
                 {
                     return false;
                 }
-                --it;
-
-                const uint64_t region_end = it->first + it->second.size;
-                if (cursor < it->first || cursor >= region_end)
-                {
-                    return false;
-                }
-                cursor = region_end;
+                cursor = it->first + it->second.size;
             }
 
             return true;
@@ -2311,6 +2435,114 @@ namespace sogen::fex
 #endif
         }
 
+#if defined(__APPLE__) || defined(__ANDROID__)
+        // memory_violation_hooks_/interrupt_hooks_ callbacks are backend-agnostic windows-emulator code
+        // that allocates, logs and mutates STL containers freely. That is fine from normal call context
+        // (where KVM/Unicorn invoke them) but not from inside handle_fault_signal, which can interrupt
+        // an unrelated malloc()/free() on this thread - a confirmed, ASLR-timing-dependent heap
+        // corruption hazard. So the handler stashes plain data here instead and forces ExecuteThread to
+        // unwind back to start() via ThreadStopHandlerAddress, without touching stop_requested_; start()
+        // dispatches the hook in normal context and resumes by re-entering ExecuteThread, which always
+        // restarts from CurrentFrame->State.rip.
+        enum class pending_fault_kind
+        {
+            none,
+            memory_violation,
+            interrupt,
+        };
+
+        struct pending_fault_dispatch
+        {
+            pending_fault_kind kind = pending_fault_kind::none;
+            uint64_t address = 0;
+            size_t size = 0;
+            memory_operation operation{};
+            memory_violation_type type{};
+            int vector = 0;
+        };
+
+        // Called only from start(), in normal call context, right after ExecuteThread returns. The
+        // return value tells start()'s loop whether ExecuteThread came back because a hook was deferred
+        // or because of a genuine stop.
+        bool dispatch_pending_hook_if_any()
+        {
+            const pending_fault_dispatch dispatch = this->pending_fault_dispatch_;
+            this->pending_fault_dispatch_.kind = pending_fault_kind::none;
+
+            switch (dispatch.kind)
+            {
+            case pending_fault_kind::memory_violation:
+                for (auto& [_, hook] : this->memory_violation_hooks_)
+                {
+                    hook(*this, dispatch.address, dispatch.size, dispatch.operation, dispatch.type);
+                }
+                return true;
+            case pending_fault_kind::interrupt:
+                for (auto& [_, hook] : this->interrupt_hooks_)
+                {
+                    hook(*this, dispatch.vector);
+                }
+                return true;
+            case pending_fault_kind::none:
+            default:
+                return false;
+            }
+        }
+
+        // Called only from signal-handler context; see pending_fault_kind for why hooks cannot run
+        // directly there. state_already_spilled selects the dispatcher unwind entry that skips the SRA
+        // spill only for FEXCore's synthetic-exception path, where CpuStateFrame is already current.
+        void defer_hook_dispatch(ucontext_t* context, const pending_fault_dispatch& dispatch, bool state_already_spilled)
+        {
+            this->pending_fault_dispatch_ = dispatch;
+            const auto& config = this->signal_delegator_->GetConfig();
+            const auto target = state_already_spilled ? config.ThreadStopHandlerAddress : config.ThreadStopHandlerAddressSpillSRA;
+#ifdef __APPLE__
+            arm_thread_state64_set_pc_fptr(context->uc_mcontext->__ss, reinterpret_cast<void*>(target));
+#else
+            context->uc_mcontext.pc = target;
+#endif
+        }
+
+        // The dispatcher is separate from FEXCore's CodeBuffer range, so IsAddressInCodeBuffer does
+        // not recognize faults taken there even though the same signal paths need to identify it.
+        bool host_pc_in_dispatcher(uint64_t pc) const
+        {
+            if (this->signal_delegator_ == nullptr)
+            {
+                return false;
+            }
+            const auto& config = this->signal_delegator_->GetConfig();
+            return pc >= config.DispatcherBegin && pc < config.DispatcherEnd;
+        }
+
+        // FEXCore's call-ret shadow stack (x25, see ensure_callret_buffer) is bracketed by a guard page
+        // on each side. Upstream FEX treats hitting either guard as recoverable and resets x25 to the
+        // default location (Base + CALLRET_STACK_SIZE/4), which this mirrors.
+        bool handle_callret_stack_fault(ucontext_t* context, uint64_t fault_address) const
+        {
+            if (this->thread_ == nullptr || this->thread_->CallRetStackBase == nullptr)
+            {
+                return false;
+            }
+
+            const auto base = reinterpret_cast<uint64_t>(this->thread_->CallRetStackBase);
+            const auto host_page = static_cast<uint64_t>(::getpagesize());
+            constexpr uint64_t callret_stack_size = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
+            if (fault_address < base - host_page || fault_address >= base + callret_stack_size + host_page)
+            {
+                return false;
+            }
+
+#ifdef __APPLE__
+            context->uc_mcontext->__ss.__x[25] = base + callret_stack_size / 4;
+#else
+            context->uc_mcontext.regs[25] = base + callret_stack_size / 4;
+#endif
+            return true;
+        }
+#endif
+
 #ifdef __APPLE__
       public:
         // Applies a decode_arm64_load result once its data has been fetched, writing the possibly
@@ -2439,114 +2671,6 @@ namespace sogen::fex
             }
 
             return false;
-        }
-
-        // memory_violation_hooks_/interrupt_hooks_ callbacks are backend-agnostic windows-emulator code
-        // that allocates, logs and mutates STL containers freely. That is fine from normal call context
-        // (where KVM/Unicorn invoke them) but not from inside handle_fault_signal, which can interrupt
-        // an unrelated malloc()/free() on this thread - a confirmed, ASLR-timing-dependent heap
-        // corruption hazard. So the handler stashes plain data here instead and forces ExecuteThread to
-        // unwind back to start() via ThreadStopHandlerAddress, without touching stop_requested_; start()
-        // dispatches the hook in normal context and resumes by re-entering ExecuteThread, which always
-        // restarts from CurrentFrame->State.rip.
-        enum class pending_fault_kind
-        {
-            none,
-            memory_violation,
-            interrupt,
-        };
-
-        struct pending_fault_dispatch
-        {
-            pending_fault_kind kind = pending_fault_kind::none;
-            uint64_t address = 0;
-            size_t size = 0;
-            memory_operation operation{};
-            memory_violation_type type{};
-            int vector = 0;
-        };
-
-        // Called only from start(), in normal call context, right after ExecuteThread returns. The
-        // return value tells start()'s loop whether ExecuteThread came back because a hook was deferred
-        // or because of a genuine stop.
-        bool dispatch_pending_hook_if_any()
-        {
-            const pending_fault_dispatch dispatch = this->pending_fault_dispatch_;
-            this->pending_fault_dispatch_.kind = pending_fault_kind::none;
-
-            switch (dispatch.kind)
-            {
-            case pending_fault_kind::memory_violation:
-                for (auto& [_, hook] : this->memory_violation_hooks_)
-                {
-                    hook(*this, dispatch.address, dispatch.size, dispatch.operation, dispatch.type);
-                }
-                return true;
-            case pending_fault_kind::interrupt:
-                for (auto& [_, hook] : this->interrupt_hooks_)
-                {
-                    hook(*this, dispatch.vector);
-                }
-                return true;
-            case pending_fault_kind::none:
-            default:
-                return false;
-            }
-        }
-
-        // Called only from signal-handler context; see pending_fault_kind for why hooks cannot run
-        // directly there.
-        //
-        // sra_already_spilled picks between the dispatcher's two unwind entry points
-        // (ThreadStopHandlerAddressSpillSRA falls through SpillStaticRegs into ThreadStopHandlerAddress).
-        // A fault taken via FEXCore's own synthetic-exception path (vector 14) has SRA already spilled to
-        // CpuStateFrame and passes true; a real hardware fault interrupting live translated code passes
-        // false, since SRA is still only in host registers there and skipping the spill would leave the
-        // next ExecuteThread entry reading stale state.
-        void defer_hook_dispatch(ucontext_t* uctx, const pending_fault_dispatch& dispatch, bool sra_already_spilled)
-        {
-            this->pending_fault_dispatch_ = dispatch;
-            const auto& cfg = this->signal_delegator_->GetConfig();
-            const auto target = sra_already_spilled ? cfg.ThreadStopHandlerAddress : cfg.ThreadStopHandlerAddressSpillSRA;
-            arm_thread_state64_set_pc_fptr(uctx->uc_mcontext->__ss, reinterpret_cast<void*>(target));
-        }
-
-        // The dispatcher is host MAP_JIT code like a CodeBuffer, but IsAddressInCodeBuffer does not
-        // recognize it, so the CodeBuffer-gated W^X retries never fire for a dispatcher fault.
-        bool host_pc_in_dispatcher(uint64_t pc) const
-        {
-            if (this->signal_delegator_ == nullptr)
-            {
-                return false;
-            }
-            const auto& cfg = this->signal_delegator_->GetConfig();
-            return pc >= cfg.DispatcherBegin && pc < cfg.DispatcherEnd;
-        }
-
-        // FEXCore's call-ret shadow stack (x25, see ensure_callret_buffer) is a return-address predictor
-        // bracketed by a guard page on each side. A deep guest call chain, or a stack pivot/longjmp
-        // abandoning already-pushed frames as steam_api.dll's RLD DRM does, legitimately runs past the
-        // committed region into a guard page. Upstream FEX treats that as expected and recovers by
-        // resetting the register to the buffer's default location (Linux
-        // SyscallHandler::HandleSegfault, Windows FEX::Windows::CallRetStack::HandleAccessViolation),
-        // which this mirrors: Base +- host_page guard, DefaultLocation = Base + CALLRET_STACK_SIZE/4,
-        // matching GetCallRetStackInfo. Classified by shape rather than si_code, since Darwin reports a
-        // PROT_NONE guard-page hit as SEGV_ACCERR/SEGV_MAPERR/BUS_ADRALN interchangeably.
-        bool handle_callret_stack_fault(ucontext_t* uctx, uint64_t fault_addr) const
-        {
-            if (this->thread_ == nullptr || this->thread_->CallRetStackBase == nullptr)
-            {
-                return false;
-            }
-            const auto base = reinterpret_cast<uint64_t>(this->thread_->CallRetStackBase);
-            const auto host_page = static_cast<uint64_t>(::getpagesize());
-            constexpr uint64_t callret_stack_size = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
-            if (fault_addr < base - host_page || fault_addr >= base + callret_stack_size + host_page)
-            {
-                return false;
-            }
-            uctx->uc_mcontext->__ss.__x[25] = base + callret_stack_size / 4;
-            return true;
         }
 
         // Real (non-synthetic) guest memory violations, which have no other path to
@@ -2885,7 +3009,7 @@ namespace sogen::fex
         {
             if (decoded.is_vector)
             {
-                auto* fpsimd = find_fpsimd_context(context);
+                auto* fpsimd = find_aarch64_context<fpsimd_context>(context, FPSIMD_MAGIC);
                 if (fpsimd == nullptr)
                 {
                     return false;
@@ -2969,93 +3093,10 @@ namespace sogen::fex
             return false;
         }
 
-        enum class pending_fault_kind
-        {
-            none,
-            memory_violation,
-            interrupt,
-        };
-
-        struct pending_fault_dispatch
-        {
-            pending_fault_kind kind = pending_fault_kind::none;
-            uint64_t address = 0;
-            size_t size = 0;
-            memory_operation operation{};
-            memory_violation_type type{};
-            int vector = 0;
-        };
-
-        bool dispatch_pending_hook_if_any()
-        {
-            const pending_fault_dispatch dispatch = this->pending_fault_dispatch_;
-            this->pending_fault_dispatch_.kind = pending_fault_kind::none;
-
-            switch (dispatch.kind)
-            {
-            case pending_fault_kind::memory_violation:
-                for (auto& [_, hook] : this->memory_violation_hooks_)
-                {
-                    hook(*this, dispatch.address, dispatch.size, dispatch.operation, dispatch.type);
-                }
-                return true;
-            case pending_fault_kind::interrupt:
-                for (auto& [_, hook] : this->interrupt_hooks_)
-                {
-                    hook(*this, dispatch.vector);
-                }
-                return true;
-            case pending_fault_kind::none:
-            default:
-                return false;
-            }
-        }
-
-        void defer_hook_dispatch(ucontext_t* context, const pending_fault_dispatch& dispatch, bool state_already_spilled)
-        {
-            this->pending_fault_dispatch_ = dispatch;
-            const auto& config = this->signal_delegator_->GetConfig();
-            context->uc_mcontext.pc = state_already_spilled ? config.ThreadStopHandlerAddress : config.ThreadStopHandlerAddressSpillSRA;
-        }
-
-        bool host_pc_in_dispatcher(uint64_t pc) const
-        {
-            if (this->signal_delegator_ == nullptr)
-            {
-                return false;
-            }
-            const auto& config = this->signal_delegator_->GetConfig();
-            return pc >= config.DispatcherBegin && pc < config.DispatcherEnd;
-        }
-
-        bool handle_callret_stack_fault(ucontext_t* context, uint64_t fault_address) const
-        {
-            if (this->thread_ == nullptr || this->thread_->CallRetStackBase == nullptr)
-            {
-                return false;
-            }
-
-            const auto base = reinterpret_cast<uint64_t>(this->thread_->CallRetStackBase);
-            const auto host_page = static_cast<uint64_t>(::getpagesize());
-            constexpr uint64_t callret_stack_size = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
-            if (fault_address < base - host_page || fault_address >= base + callret_stack_size + host_page)
-            {
-                return false;
-            }
-
-            context->uc_mcontext.regs[25] = base + callret_stack_size / 4;
-            return true;
-        }
-
         memory_permission permissions_at(uint64_t address) const
         {
-            auto it = this->regions_.upper_bound(address);
-            if (it == this->regions_.begin())
-            {
-                return memory_permission::none;
-            }
-            --it;
-            return address < it->first + it->second.size ? it->second.permissions : memory_permission::none;
+            const auto it = this->find_region_containing(address);
+            return it != this->regions_.end() ? it->second.permissions : memory_permission::none;
         }
 
         bool handle_general_memory_violation(ucontext_t* context, uint64_t fault_address)
@@ -3066,8 +3107,21 @@ namespace sogen::fex
             memory_operation operation = memory_operation::exec;
             if (fault_address != pc)
             {
-                const auto instruction = *reinterpret_cast<const uint32_t*>(pc);
-                operation = decode_arm64_store(instruction) ? memory_operation::write : memory_operation::read;
+                // The emulation decoder below is intentionally limited to the ordered STLR-family
+                // instructions that can fault for alignment. Ordinary translated STR/STUR stores must
+                // still be reported as writes on real protection faults, so use the kernel-provided
+                // AArch64 ESR WnR bit for access classification instead of broadening that decoder.
+                constexpr uint64_t esr_write_not_read = 1ULL << 6;
+                if (const auto* esr = find_aarch64_context<esr_context>(context, ESR_MAGIC))
+                {
+                    operation = (esr->esr & esr_write_not_read) != 0 ? memory_operation::write : memory_operation::read;
+                }
+                else
+                {
+                    // Keep the prior fallback for kernels that omit ESR context records.
+                    const auto instruction = *reinterpret_cast<const uint32_t*>(pc);
+                    operation = decode_arm64_store(instruction) ? memory_operation::write : memory_operation::read;
+                }
             }
 
             if ((permissions & operation) == operation)
@@ -3139,7 +3193,7 @@ namespace sogen::fex
                 const auto guard_page = this->thread_->JITGuardPage;
                 if (guard_page != 0 && fault_address >= guard_page && fault_address < guard_page + FEXCore::Utils::FEX_HOST_PAGE_SIZE)
                 {
-                    auto* fpsimd = find_fpsimd_context(context);
+                    auto* fpsimd = find_aarch64_context<fpsimd_context>(context, FPSIMD_MAGIC);
                     if (fpsimd == nullptr)
                     {
                         return false;
@@ -3268,8 +3322,11 @@ namespace sogen::fex
                 // ThreadManager::GetCallRetStackInfo's DefaultLocation (Base + size/4).
                 state.callret_sp = reinterpret_cast<uint64_t>(callret_stack_base) + callret_stack_size / 4;
 
-                this->callret_buffers_.emplace_back(alloc_base, callret_alloc_size);
-                this->callret_buffer_generations_.emplace(state._pad1, this->thread_->CodeBufferGeneration);
+                this->callret_buffers_.emplace(state._pad1, callret_buffer_record{
+                                                                 .allocation_base = alloc_base,
+                                                                 .allocation_size = callret_alloc_size,
+                                                                 .code_buffer_generation = this->thread_->CodeBufferGeneration,
+                                                             });
             }
         }
 
@@ -3471,8 +3528,7 @@ namespace sogen::fex
         // Every per-logical-thread call-ret buffer ever allocated by ensure_callret_buffer, so the
         // destructor can release them - these live outside regions_ (host allocator space, not the
         // guest address space) and outlive any individual CPUState snapshot they were allocated for.
-        std::vector<std::pair<void*, size_t>> callret_buffers_;
-        std::unordered_map<uint64_t, uint64_t> callret_buffer_generations_;
+        std::unordered_map<uint64_t, callret_buffer_record> callret_buffers_;
 
 #ifdef __APPLE__
         // Apple Silicon's 16KB host page is coarser than the guest's 4KB architectural page, so one host
@@ -3523,10 +3579,14 @@ namespace sogen::fex
                 ::write(STDERR_FILENO, buf, write_len);
             }
 
+#ifdef __ANDROID__
+            dispatch_previous_fault_signal_action(sig, info, raw_ucontext);
+#else
             struct sigaction default_action = {};
             default_action.sa_handler = SIG_DFL;
             ::sigaction(sig, &default_action, nullptr);
             ::raise(sig);
+#endif
         }
     } // namespace
 #endif
