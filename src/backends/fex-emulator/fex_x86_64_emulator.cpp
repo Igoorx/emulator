@@ -23,7 +23,7 @@
 #include <cstdlib>
 #include <signal.h>
 #include <sys/mman.h>
-#include <ucontext.h>
+#include <sys/ucontext.h>
 #include <unistd.h>
 
 // Used unconditionally by the std::terminate handler in initialize_context(). Both platforms
@@ -936,7 +936,7 @@ namespace sogen::fex
             sigset_t old_mask{};
             const bool have_old_mask = ::sigprocmask(SIG_SETMASK, nullptr, &old_mask) == 0;
             ::sigprocmask(SIG_BLOCK, &action.sa_mask, nullptr);
-            if ((action.sa_flags & SA_NODEFER) != 0 && ::sigismember(&action.sa_mask, sig) == 0)
+            if ((action.sa_flags & SA_NODEFER) != 0 && sigismember(&action.sa_mask, sig) == 0)
             {
                 sigset_t signal_mask{};
                 sigemptyset(&signal_mask);
