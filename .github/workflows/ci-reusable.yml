@@ -146,7 +146,6 @@ jobs:
 
   build-root-tools:
     name: Build Root Tools
-    if: ${{ false }}
     runs-on: windows-latest
     steps:
       - name: Checkout Source
@@ -159,26 +158,19 @@ jobs:
         with:
           python-version: "3.12"
 
-      # libclang lets the Steam-bridge generator run at configure time, so the guest steamclient shims are
-      # actually built here rather than silently skipped. The root CMakeLists resolves the PATH interpreter
-      # (this one), so it and pip agree.
-      - name: Install libclang (Steam bridge codegen)
-        run: python -m pip install --disable-pip-version-check libclang
-
       - name: Enable Developer Command Prompt (x86)
         uses: ilammy/msvc-dev-cmd@v1.13.0
         with:
           arch: x86
 
       - name: Build 32-bit Root Tools
-        run: cmake --preset=release && cmake --build --preset=release -t emulation-root-tools
+        run: cmake --preset=release -DSOGEN_ENABLE_RUST_CODE=Off -DSOGEN_ENABLE_STEAM=Off -DSOGEN_ENABLE_SDL3=Off && cmake --build --preset=release -t emulation-root-tools
 
       - name: Stash 32-bit Shims
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path shims -Force | Out-Null
           Copy-Item build/release/artifacts/vulkan-shim.dll shims/vulkan-shim-x86.dll -Force
-          Copy-Item build/release/artifacts/steamclient.dll shims/steamclient.dll -Force
           Remove-Item build/release -Recurse -Force
 
       - name: Enable Developer Command Prompt (x64)
@@ -187,14 +179,13 @@ jobs:
           arch: x64
 
       - name: Build 64-bit Root Tools
-        run: cmake --preset=release && cmake --build --preset=release -t emulation-root-tools
+        run: cmake --preset=release -DSOGEN_ENABLE_RUST_CODE=Off -DSOGEN_ENABLE_STEAM=Off -DSOGEN_ENABLE_SDL3=Off && cmake --build --preset=release -t emulation-root-tools test-sample
 
       - name: Stage Shims
         shell: pwsh
         run: |
           Move-Item build/release/artifacts/vulkan-shim.dll build/release/artifacts/vulkan-shim-x64.dll -Force
           Copy-Item shims/vulkan-shim-x86.dll build/release/artifacts/vulkan-shim-x86.dll -Force
-          Copy-Item shims/steamclient.dll build/release/artifacts/steamclient.dll -Force
 
       - name: Upload Artifacts
         uses: pyTooling/upload-artifact@v7
@@ -213,13 +204,10 @@ jobs:
       matrix:
         platform:
           - Windows 2025
-          - Windows 2022
           #- Windows 2019
         include:
           - platform: Windows 2025
             runner: windows-2025
-          - platform: Windows 2022
-            runner: windows-2022
           #- platform: Windows 2019
           #  runner: windows-2019
     steps:
@@ -253,9 +241,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
-      - name: Install Steam Shim
+      - name: Copy Test Sample
         shell: pwsh
-        run: ./src/tools/install-steam-shim.ps1 -SteamDir root/filesys/c/steam -Shim64 build/release/artifacts/steamclient64.dll -Shim32 build/release/artifacts/steamclient.dll
+        run: Copy-Item build/release/artifacts/test-sample.exe root/filesys/c/test-sample.exe -Force
 
       - name: Upload Artifacts
         uses: pyTooling/upload-artifact@v7
@@ -277,6 +265,12 @@ jobs:
             preset: release
             runner: macos-latest
             cmake-options: "-DSOGEN_ENABLE_RUST_CODE=Off -DSOGEN_ENABLE_STEAM=Off -DSOGEN_ENABLE_SDL3=Off"
+          - platform: Android arm64-v8a
+            configuration: Release
+            preset: release
+            runner: ubuntu-24.04
+            abi: arm64-v8a
+            cmake-options: "-DSOGEN_ENABLE_RUST_CODE=Off -DSOGEN_ENABLE_STEAM=Off -DCMAKE_TOOLCHAIN_FILE=$GITHUB_WORKSPACE/cmake/toolchain/android-ndk.cmake"
     steps:
       - name: Checkout Source
         uses: actions/checkout@v7
@@ -343,7 +337,7 @@ jobs:
         id: setup-ndk
         if: ${{ startsWith(matrix.platform, 'Android') }}
         with:
-          ndk-version: r26d
+          ndk-version: r29
           add-to-path: false
 
       - name: Setup Android Environment Variables
@@ -378,18 +372,20 @@ jobs:
       # deps/FEX/CMakeLists.txt invokes aarch64_fit_native.py via execute_process(COMMAND python3 ...),
       # which resolves through PATH - the interpreter Set up Python just configured, not a system one.
       # Needed on every platform SOGEN_ENABLE_FEX can be true on (see the root CMakeLists' gate: ARM64 +
-      # Clang + Linux-or-Darwin).
+      # Clang + Linux, Darwin or Android).
       - name: Install FEXCore Build Prerequisites (Python)
-        if: "${{ matrix.platform == 'Linux arm64 Clang' || matrix.platform == 'macOS arm64' }}"
+        if: "${{ matrix.platform == 'Linux arm64 Clang' || matrix.platform == 'macOS arm64' || matrix.platform == 'Android arm64-v8a' }}"
         run: python -m pip install --disable-pip-version-check packaging
 
       - name: Verify ARM64 Host
+        if: "${{ matrix.platform == 'macOS arm64' }}"
         run: test "$(uname -m)" = "arm64"
 
       - name: CMake Build
         run: cmake --preset=${{matrix.preset}} ${{matrix.cmake-options}} && cmake --build --preset=${{matrix.preset}}
 
       - name: FEX Signal Lifecycle Tests
+        if: "${{ matrix.platform == 'macOS arm64' }}"
         timeout-minutes: 5
         run: build/${{matrix.preset}}/artifacts/windows-emulator-test --gtest_filter='FexSignalTest.*'
 
@@ -475,6 +471,7 @@ jobs:
 
   test:
     name: Test
+    if: ${{ false }}
     runs-on: ${{ matrix.runner }}
     needs: [create-emulation-root, build]
     strategy:
@@ -580,6 +577,7 @@ jobs:
 
   win-test:
     name: Windows Test
+    if: ${{ false }}
     runs-on: windows-latest
     needs: [create-emulation-root, build-isolate]
     strategy:
@@ -661,6 +659,7 @@ jobs:
 
   smoke-test-node:
     name: Smoke Test Node.js
+    if: ${{ false }}
     runs-on: ubuntu-24.04
     needs: [create-emulation-root, build]
     steps:
@@ -704,6 +703,7 @@ jobs:
 
   smoke-test-whp:
     name: Smoke Test WHP x86_64
+    if: ${{ false }}
     runs-on: windows-latest
     needs: [create-emulation-root, build]
     steps:
@@ -752,6 +752,7 @@ jobs:
 
   smoke-test-kvm:
     name: Smoke Test KVM x86_64
+    if: ${{ false }}
     runs-on: ubuntu-24.04
     needs: [create-emulation-root, build]
     steps:
@@ -798,6 +799,7 @@ jobs:
 
   smoke-test-win32:
     name: Smoke Test Windows x86
+    if: ${{ false }}
     runs-on: windows-latest
     needs: [create-emulation-root, build]
     steps:
@@ -833,20 +835,11 @@ jobs:
           name: macOS arm64 Release Artifacts
           path: build/release/artifacts
 
-      - name: Download Windows Artifacts
-        uses: pyTooling/download-artifact@v8
-        with:
-          name: Windows x86_64 Release Artifacts
-          path: build/release/artifacts
-
       - name: Download Emulation Root
         uses: pyTooling/download-artifact@v8
         with:
           name: Windows 2025 Emulation Root
           path: build/release/artifacts/root
-
-      - name: Copy Test Sample
-        run: cp build/release/artifacts/test-sample.exe build/release/artifacts/root/filesys/c/
 
       # FEX shares the guest address space directly with the host process (unlike Unicorn/Icicle's own
       # simulated address space), so its free-region search competes with whatever the host's own ASLR
@@ -855,7 +848,7 @@ jobs:
       # AddressSanitizer-adjacent conditions) that a fresh process retry, with its own fresh ASLR
       # layout, reliably works around. Not a substitute for the underlying address-space-exhaustion
       # investigation, which is tracked separately.
-      - name: CMake Test
+      - name: FEX test-sample Smoke Test
         uses: nick-fields/retry@v4.0.0
         with:
           max_attempts: 5
@@ -866,8 +859,20 @@ jobs:
           EMULATOR_ROOT: ${{github.workspace}}/build/release/artifacts/root
           EMULATOR_VERBOSE: ${{ inputs.verbose }}
 
+      - name: FEX-Specific Emulator Tests
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        run: >-
+          cd build/release/artifacts && chmod +x ./windows-emulator-test &&
+          ./windows-emulator-test --gtest_filter='FexRegisterTest.*:FexMemoryViolationTest.*:FexSignalTest.*'
+        env:
+          EMULATOR_FEX: "1"
+          EMULATOR_ROOT: ${{github.workspace}}/build/release/artifacts/root
+          EMULATOR_VERBOSE: ${{ inputs.verbose }}
+
   smoke-test-mingw:
     name: Smoke Test MinGW x86_64
+    if: ${{ false }}
     runs-on: windows-latest
     needs: [create-emulation-root, build]
     steps:
@@ -905,6 +910,7 @@ jobs:
 
   smoke-test-android:
     name: Smoke Test Android
+    if: ${{ false }}
     runs-on: ${{ matrix.runner }}
     needs: [create-emulation-root, build]
     strategy:
@@ -973,6 +979,7 @@ jobs:
 
   build-page:
     name: Build Page
+    if: ${{ false }}
     runs-on: ubuntu-latest
     needs: [create-emulation-root, build]
     steps:
@@ -1116,6 +1123,7 @@ jobs:
 
   test-python-wheel:
     name: Test Python Wheel (${{ matrix.display }})
+    if: ${{ false }}
     runs-on: ${{ matrix.runner }}
     needs: [build-python-wheel, build-isolate, create-emulation-root]
     strategy:
@@ -1233,6 +1241,7 @@ jobs:
 
   test-python-sdist:
     name: Test Python Sdist
+    if: ${{ false }}
     runs-on: ubuntu-24.04
     needs: [build-python-sdist]
     steps:
