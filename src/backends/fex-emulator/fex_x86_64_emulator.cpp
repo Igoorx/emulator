@@ -21,6 +21,7 @@
 // The 16KB/4KB page reconciliation and MAP_JIT handling remain Darwin-only.
 
 #include <cstdlib>
+#include <pthread.h>
 #include <signal.h>
 #include <sys/mman.h>
 #include <sys/ucontext.h>
@@ -35,7 +36,6 @@
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <mach/arm/thread_status.h>
-#include <pthread.h>
 #include <libkern/OSCacheControl.h>
 #include <libproc.h>
 #endif
@@ -934,14 +934,14 @@ namespace sogen::fex
             }
 
             sigset_t old_mask{};
-            const bool have_old_mask = ::sigprocmask(SIG_SETMASK, nullptr, &old_mask) == 0;
-            ::sigprocmask(SIG_BLOCK, &action.sa_mask, nullptr);
+            const bool have_old_mask = ::pthread_sigmask(SIG_SETMASK, nullptr, &old_mask) == 0;
+            ::pthread_sigmask(SIG_BLOCK, &action.sa_mask, nullptr);
             if ((action.sa_flags & SA_NODEFER) != 0 && sigismember(&action.sa_mask, sig) == 0)
             {
                 sigset_t signal_mask{};
                 sigemptyset(&signal_mask);
                 sigaddset(&signal_mask, sig);
-                ::sigprocmask(SIG_UNBLOCK, &signal_mask, nullptr);
+                ::pthread_sigmask(SIG_UNBLOCK, &signal_mask, nullptr);
             }
 
             if ((action.sa_flags & SA_SIGINFO) != 0)
@@ -955,7 +955,7 @@ namespace sogen::fex
 
             if (have_old_mask)
             {
-                ::sigprocmask(SIG_SETMASK, &old_mask, nullptr);
+                ::pthread_sigmask(SIG_SETMASK, &old_mask, nullptr);
             }
         }
 

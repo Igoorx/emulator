@@ -202,6 +202,10 @@ namespace sogen::test
         EXPECT_EQ(::write(release_pipe[1], &byte, 1), 1);
         signal_thread.join();
 
+        sigset_t joined_signal_mask{};
+        ASSERT_EQ(::sigprocmask(SIG_SETMASK, nullptr, &joined_signal_mask), 0);
+        EXPECT_EQ(sigismember(&joined_signal_mask, SIGTRAP), 0) << "SIGTRAP was blocked while joining the signal thread";
+
         block_previous_sigtrap_handler = 0;
         previous_sigtrap_entered_fd = -1;
         previous_sigtrap_release_fd = -1;
@@ -246,6 +250,16 @@ namespace sogen::test
         const bool backend_available = emu != nullptr;
         if (emu)
         {
+            struct sigaction emulator_action{};
+            ASSERT_EQ(::sigaction(SIGTRAP, nullptr, &emulator_action), 0);
+            EXPECT_NE(emulator_action.sa_handler, previous_sigtrap_handler);
+            EXPECT_NE(emulator_action.sa_flags & SA_SIGINFO, 0);
+
+            stack_t emulator_stack{};
+            ASSERT_EQ(::sigaltstack(nullptr, &emulator_stack), 0);
+            EXPECT_EQ(emulator_stack.ss_sp, application_stack.ss_sp);
+            EXPECT_EQ(emulator_stack.ss_size, application_stack.ss_size);
+
             EXPECT_EQ(::raise(SIGTRAP), 0);
             EXPECT_EQ(previous_sigtrap_count, 1);
             EXPECT_EQ(previous_sigtrap_on_expected_stack, 1);
