@@ -57,6 +57,7 @@
 #include <utility>
 #include <vector>
 
+#include <utils/finally.hpp>
 #include <utils/object.hpp>
 
 // FEXCore embedding headers. These are only available when building against a FEX checkout/install;
@@ -612,51 +613,6 @@ namespace sogen::fex
             return features;
         }
 
-        // sogen runs one FEX-backed guest thread per process, so a single active-instance pointer is
-        // enough for the signal handler below to reach the emulator's hook tables and thread state.
-        // Signal handlers cannot be non-static member functions, hence the indirection.
-        fex_x86_64_emulator* g_active_emulator = nullptr;
-
-        void fault_signal_handler(int sig, siginfo_t* info, void* raw_ucontext);
-
-        void install_fault_signal_handlers(fex_x86_64_emulator& emulator)
-        {
-            // Fault routing is process-global (one sigaction handler set, one active-instance
-            // pointer). A second live instance would silently receive the first one's faults, so
-            // refuse it outright - reachable e.g. via the Python bindings constructing two emulators.
-            if (g_active_emulator != nullptr)
-            {
-                throw std::runtime_error("Only one FEX emulator instance can be active per process");
-            }
-
-            g_active_emulator = &emulator;
-
-            // A dedicated alternate stack, so a second signal arriving while this handler is already
-            // running does not nest on the faulting thread's potentially near-exhausted stack.
-            static std::byte alt_stack[64 * 1024];
-            stack_t ss{};
-            ss.ss_sp = alt_stack;
-            ss.ss_size = sizeof(alt_stack);
-            ss.ss_flags = 0;
-            ::sigaltstack(&ss, nullptr);
-
-            struct sigaction action = {};
-            action.sa_sigaction = fault_signal_handler;
-            action.sa_flags = SA_SIGINFO | SA_ONSTACK;
-            sigemptyset(&action.sa_mask);
-
-            ::sigaction(SIGSEGV, &action, nullptr);
-            ::sigaction(SIGBUS, &action, nullptr);
-            ::sigaction(SIGILL, &action, nullptr);
-
-            // FEXCore's IR "Break" op models x86 HLT/UD2/INT3/INT1/INTO uniformly via distinct native
-            // traps chosen per Dispatcher.cpp's GuestSignal_SIG* stubs: HLT/UDF raise SIGILL, BRK raises
-            // SIGTRAP. INT3 (DebugBreak()) goes through the SIGTRAP stub, so without a handler here that
-            // BRK is an unhandled hardware trap terminating the process, instead of reaching the vector
-            // dispatch below, which handles vector 3 correctly.
-            ::sigaction(SIGTRAP, &action, nullptr);
-        }
-
         // Arm64JITCore::ExitFunctionLink (JIT.cpp) patches an already-compiled call site once its target
         // block is known, writing straight into a MAP_JIT code buffer without a JITWriteScope, because
         // it is written for Linux, which has no per-thread W^X state. Pointers.ExitFunctionLink is a
@@ -904,25 +860,28 @@ namespace sogen::fex
             }
             return nullptr;
         }
+#endif
 
-        fex_x86_64_emulator* g_active_emulator = nullptr;
+#if defined(__APPLE__) || defined(__ANDROID__)
+        thread_local fex_x86_64_emulator* g_active_emulator = nullptr;
+        bool fault_signal_handlers_installed = false;
 
         void fault_signal_handler(int sig, siginfo_t* info, void* raw_ucontext);
 
         constexpr std::array<int, 4> fault_signals = {SIGSEGV, SIGBUS, SIGILL, SIGTRAP};
         std::array<struct sigaction, fault_signals.size()> previous_fault_signal_actions{};
-        stack_t previous_fault_alt_stack{};
-        std::array<std::byte, 64 * 1024> fault_alt_stack{};
+        std::mutex fault_signal_install_mutex{};
+        thread_local stack_t previous_fault_alt_stack{};
+        thread_local bool fault_alt_stack_installed = false;
+        thread_local std::array<std::byte, 64 * 1024> fault_alt_stack{};
 
-        void uninstall_fault_signal_handlers(fex_x86_64_emulator& emulator) noexcept
+        void uninstall_fault_signal_handlers() noexcept
         {
-            if (g_active_emulator != &emulator)
+            std::lock_guard lock{fault_signal_install_mutex};
+            if (!fault_signal_handlers_installed)
             {
                 return;
             }
-
-            // Stop routing new faults to this object before changing any process-global disposition.
-            g_active_emulator = nullptr;
 
             // Do not overwrite an embedding application that deliberately replaced one of our handlers
             // while the backend was alive; only restore entries that are still ours.
@@ -935,13 +894,7 @@ namespace sogen::fex
                     ::sigaction(fault_signals[i], &previous_fault_signal_actions[i], nullptr);
                 }
             }
-
-            stack_t current_stack{};
-            if (::sigaltstack(nullptr, &current_stack) == 0 && (current_stack.ss_flags & SS_DISABLE) == 0 &&
-                current_stack.ss_sp == fault_alt_stack.data() && current_stack.ss_size == fault_alt_stack.size())
-            {
-                ::sigaltstack(&previous_fault_alt_stack, nullptr);
-            }
+            fault_signal_handlers_installed = false;
         }
 
         void dispatch_previous_fault_signal_action(int sig, siginfo_t* info, void* raw_ucontext)
@@ -1006,33 +959,20 @@ namespace sogen::fex
             }
         }
 
-        void install_fault_signal_handlers(fex_x86_64_emulator& emulator)
+        void install_fault_signal_handlers()
         {
-            if (g_active_emulator != nullptr)
+            std::lock_guard lock{fault_signal_install_mutex};
+            if (fault_signal_handlers_installed)
             {
                 throw std::runtime_error("Only one FEX emulator instance can be active per process");
             }
 
-            // Capture every process-global value before mutating any of them, so a setup failure cannot
-            // strand a mixture of application and FEX dispositions.
-            if (::sigaltstack(nullptr, &previous_fault_alt_stack) != 0)
-            {
-                throw std::runtime_error("FEX backend failed to query the Android alternate signal stack");
-            }
             for (size_t i = 0; i < fault_signals.size(); ++i)
             {
                 if (::sigaction(fault_signals[i], nullptr, &previous_fault_signal_actions[i]) != 0)
                 {
-                    throw std::runtime_error("FEX backend failed to query an Android fault signal action");
+                    throw std::runtime_error("FEX backend failed to query a fault signal action");
                 }
-            }
-
-            stack_t stack{};
-            stack.ss_sp = fault_alt_stack.data();
-            stack.ss_size = fault_alt_stack.size();
-            if (::sigaltstack(&stack, nullptr) != 0)
-            {
-                throw std::runtime_error("FEX backend failed to install the Android alternate signal stack");
             }
 
             struct sigaction action{};
@@ -1053,20 +993,68 @@ namespace sogen::fex
                     {
                         restored &= ::sigaction(fault_signals[i - 1], &previous_fault_signal_actions[i - 1], nullptr) == 0;
                     }
-                    restored &= ::sigaltstack(&previous_fault_alt_stack, nullptr) == 0;
                     if (!restored)
                     {
                         // Do not report a recoverable constructor failure while leaving partial
                         // process-global signal state installed.
                         std::terminate();
                     }
-                    throw std::runtime_error("FEX backend failed to install an Android fault signal action");
+                    throw std::runtime_error("FEX backend failed to install a fault signal action");
                 }
             }
 
-            // Publish the active object only after setup is complete. Until this point, any handler that
-            // happens to run chains to the previously captured application disposition instead.
+            fault_signal_handlers_installed = true;
+        }
+
+        void activate_fault_signal_handling(fex_x86_64_emulator& emulator)
+        {
+            if (g_active_emulator != nullptr)
+            {
+                throw std::runtime_error("A FEX emulator is already active on this thread");
+            }
+
+            stack_t current_stack{};
+            if (::sigaltstack(nullptr, &current_stack) != 0)
+            {
+                throw std::runtime_error("FEX backend failed to query the alternate signal stack");
+            }
+
+            if ((current_stack.ss_flags & SS_DISABLE) != 0)
+            {
+                stack_t stack{};
+                stack.ss_sp = fault_alt_stack.data();
+                stack.ss_size = fault_alt_stack.size();
+                if (::sigaltstack(&stack, nullptr) != 0)
+                {
+                    throw std::runtime_error("FEX backend failed to install the alternate signal stack");
+                }
+                previous_fault_alt_stack = current_stack;
+                fault_alt_stack_installed = true;
+            }
+
             g_active_emulator = &emulator;
+        }
+
+        void deactivate_fault_signal_handling(fex_x86_64_emulator& emulator) noexcept
+        {
+            if (g_active_emulator != &emulator)
+            {
+                return;
+            }
+
+            g_active_emulator = nullptr;
+            if (!fault_alt_stack_installed)
+            {
+                return;
+            }
+
+            stack_t current_stack{};
+            if (::sigaltstack(nullptr, &current_stack) == 0 && (current_stack.ss_flags & (SS_DISABLE | SS_ONSTACK)) == 0 &&
+                current_stack.ss_sp == fault_alt_stack.data() && current_stack.ss_size == fault_alt_stack.size())
+            {
+                ::sigaltstack(&previous_fault_alt_stack, nullptr);
+            }
+            fault_alt_stack_installed = false;
         }
 #endif
     }
@@ -1112,6 +1100,10 @@ namespace sogen::fex
 
         ~fex_x86_64_emulator() override
         {
+#if defined(__APPLE__) || defined(__ANDROID__)
+            uninstall_fault_signal_handlers();
+#endif
+
             utils::reset_object_with_delayed_destruction(this->memory_read_hooks_);
             utils::reset_object_with_delayed_destruction(this->memory_write_hooks_);
             utils::reset_object_with_delayed_destruction(this->memory_execution_hooks_);
@@ -1136,10 +1128,6 @@ namespace sogen::fex
                 ::munmap(reinterpret_cast<void*>(host_page), host_page_size_apple);
             }
 
-            if (g_active_emulator == this)
-            {
-                g_active_emulator = nullptr;
-            }
 #else
             for (const auto& [address, region] : this->regions_)
             {
@@ -1148,10 +1136,6 @@ namespace sogen::fex
                     ::munmap(reinterpret_cast<void*>(address), region.size);
                 }
             }
-#endif
-
-#ifdef __ANDROID__
-            uninstall_fault_signal_handlers(*this);
 #endif
 
             // Per-logical-thread call-ret buffers (see ensure_callret_buffer) live in host allocator
@@ -1191,6 +1175,11 @@ namespace sogen::fex
             {
                 this->create_thread();
             }
+
+#if defined(__APPLE__) || defined(__ANDROID__)
+            activate_fault_signal_handling(*this);
+            const auto fault_signal_cleanup = utils::finally([this] { deactivate_fault_signal_handling(*this); });
+#endif
 
             this->stop_requested_ = false;
             // Re-arm InterruptFaultPage for this quantum - see request_thread_stop's doc comment; a
@@ -2032,7 +2021,7 @@ namespace sogen::fex
         // region bookkeeping
 
         // Returns the region that contains address, not merely its predecessor in the ordered map.
-        auto find_region_containing(uint64_t address) const
+        std::map<uint64_t, mapped_region>::const_iterator find_region_containing(uint64_t address) const
         {
             auto it = this->regions_.upper_bound(address);
             if (it == this->regions_.begin())
@@ -2431,7 +2420,7 @@ namespace sogen::fex
             this->context_->InitCore();
 
 #if defined(__APPLE__) || defined(__ANDROID__)
-            install_fault_signal_handlers(*this);
+            install_fault_signal_handlers();
 #endif
         }
 
@@ -3323,10 +3312,10 @@ namespace sogen::fex
                 state.callret_sp = reinterpret_cast<uint64_t>(callret_stack_base) + callret_stack_size / 4;
 
                 this->callret_buffers_.emplace(state._pad1, callret_buffer_record{
-                                                                 .allocation_base = alloc_base,
-                                                                 .allocation_size = callret_alloc_size,
-                                                                 .code_buffer_generation = this->thread_->CodeBufferGeneration,
-                                                             });
+                                                                .allocation_base = alloc_base,
+                                                                .allocation_size = callret_alloc_size,
+                                                                .code_buffer_generation = this->thread_->CodeBufferGeneration,
+                                                            });
             }
         }
 
@@ -3556,37 +3545,16 @@ namespace sogen::fex
     {
         void fault_signal_handler(int sig, siginfo_t* info, void* raw_ucontext)
         {
-            auto* uctx = static_cast<ucontext_t*>(raw_ucontext);
-
             const bool handled = g_active_emulator != nullptr && g_active_emulator->handle_fault_signal(sig, info, raw_ucontext);
             if (handled)
             {
                 return;
             }
 
-            // stdio is not async-signal-safe; snprintf into a fixed stack buffer plus a single write(2).
-            char buf[160];
-#ifdef __APPLE__
-            const uint64_t pc = arm_thread_state64_get_pc(uctx->uc_mcontext->__ss);
-#else
-            const uint64_t pc = uctx->uc_mcontext.pc;
-#endif
-            const int len = snprintf(buf, sizeof(buf), "[FEX backend] unhandled signal %d si_code=%d at pc=0x%llx fault_addr=%p\n", sig,
-                                     info->si_code, static_cast<unsigned long long>(pc), info->si_addr);
-            if (len > 0)
-            {
-                const auto write_len = static_cast<size_t>(len) < sizeof(buf) ? static_cast<size_t>(len) : sizeof(buf);
-                ::write(STDERR_FILENO, buf, write_len);
-            }
+            static constexpr char message[] = "[FEX backend] unhandled host signal\n";
+            ::write(STDERR_FILENO, message, sizeof(message) - 1);
 
-#ifdef __ANDROID__
             dispatch_previous_fault_signal_action(sig, info, raw_ucontext);
-#else
-            struct sigaction default_action = {};
-            default_action.sa_handler = SIG_DFL;
-            ::sigaction(sig, &default_action, nullptr);
-            ::raise(sig);
-#endif
         }
     } // namespace
 #endif
