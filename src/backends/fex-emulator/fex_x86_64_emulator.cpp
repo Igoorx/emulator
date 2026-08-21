@@ -2488,11 +2488,7 @@ namespace sogen::fex
             this->pending_fault_dispatch_ = dispatch;
             const auto& config = this->signal_delegator_->GetConfig();
             const auto target = state_already_spilled ? config.ThreadStopHandlerAddress : config.ThreadStopHandlerAddressSpillSRA;
-#ifdef __APPLE__
-            arm_thread_state64_set_pc_fptr(context->uc_mcontext->__ss, reinterpret_cast<void*>(target));
-#else
-            context->uc_mcontext.pc = target;
-#endif
+            set_host_pc(context, target);
         }
 
         // The dispatcher is separate from FEXCore's CodeBuffer range, so IsAddressInCodeBuffer does
@@ -2505,6 +2501,77 @@ namespace sogen::fex
             }
             const auto& config = this->signal_delegator_->GetConfig();
             return pc >= config.DispatcherBegin && pc < config.DispatcherEnd;
+        }
+
+        static uint64_t get_host_pc(ucontext_t* context)
+        {
+#ifdef __APPLE__
+            return arm_thread_state64_get_pc(context->uc_mcontext->__ss);
+#else
+            return context->uc_mcontext.pc;
+#endif
+        }
+
+        static void set_host_pc(ucontext_t* context, uint64_t pc)
+        {
+#ifdef __APPLE__
+            arm_thread_state64_set_pc_fptr(context->uc_mcontext->__ss, reinterpret_cast<void*>(pc));
+#else
+            context->uc_mcontext.pc = pc;
+#endif
+        }
+
+        static uint64_t host_gpr(ucontext_t* context, uint32_t index)
+        {
+            if (index == 31)
+            {
+                return 0;
+            }
+
+#ifdef __APPLE__
+            if (index <= 28)
+            {
+                return context->uc_mcontext->__ss.__x[index];
+            }
+            return index == 29 ? context->uc_mcontext->__ss.__fp : context->uc_mcontext->__ss.__lr;
+#else
+            return context->uc_mcontext.regs[index];
+#endif
+        }
+
+        static void set_host_gpr(ucontext_t* context, uint32_t index, uint64_t value)
+        {
+            if (index == 31)
+            {
+                return;
+            }
+
+#ifdef __APPLE__
+            if (index <= 28)
+            {
+                context->uc_mcontext->__ss.__x[index] = value;
+            }
+            else if (index == 29)
+            {
+                context->uc_mcontext->__ss.__fp = value;
+            }
+            else
+            {
+                context->uc_mcontext->__ss.__lr = value;
+            }
+#else
+            context->uc_mcontext.regs[index] = value;
+#endif
+        }
+
+        static __uint128_t* host_vector_registers(ucontext_t* context)
+        {
+#ifdef __APPLE__
+            return reinterpret_cast<__uint128_t*>(&context->uc_mcontext->__ns.__v[0]);
+#else
+            auto* fpsimd = find_aarch64_context<fpsimd_context>(context, FPSIMD_MAGIC);
+            return fpsimd != nullptr ? fpsimd->vregs : nullptr;
+#endif
         }
 
         // FEXCore's call-ret shadow stack (x25, see ensure_callret_buffer) is bracketed by a guard page
@@ -2525,29 +2592,28 @@ namespace sogen::fex
                 return false;
             }
 
-#ifdef __APPLE__
-            context->uc_mcontext->__ss.__x[25] = base + callret_stack_size / 4;
-#else
-            context->uc_mcontext.regs[25] = base + callret_stack_size / 4;
-#endif
+            set_host_gpr(context, 25, base + callret_stack_size / 4);
             return true;
         }
-#endif
 
-#ifdef __APPLE__
       public:
         // Applies a decode_arm64_load result once its data has been fetched, writing the possibly
         // extended value into the destination register and advancing PC past the decoded instruction.
-        void complete_decoded_load(ucontext_t* uctx, const decoded_arm64_load& decoded, const void* data, uint64_t pc)
+        bool complete_decoded_load(ucontext_t* uctx, const decoded_arm64_load& decoded, const void* data, uint64_t pc)
         {
             if (decoded.is_vector)
             {
+                auto* fprs = host_vector_registers(uctx);
+                if (fprs == nullptr)
+                {
+                    return false;
+                }
+
                 __uint128_t value{};
                 std::memcpy(&value, data, sizeof(value));
-                auto* fprs = reinterpret_cast<__uint128_t*>(&uctx->uc_mcontext->__ns.__v[0]);
                 fprs[decoded.rt] = value;
-                arm_thread_state64_set_pc_fptr(uctx->uc_mcontext->__ss, reinterpret_cast<void*>(pc + 4));
-                return;
+                set_host_pc(uctx, pc + 4);
+                return true;
             }
 
             uint64_t raw_value = 0;
@@ -2579,30 +2645,19 @@ namespace sogen::fex
                 result &= 0xFFFFFFFFULL;
             }
 
-            if (decoded.rt <= 28)
-            {
-                uctx->uc_mcontext->__ss.__x[decoded.rt] = result;
-            }
-            else if (decoded.rt == 29)
-            {
-                uctx->uc_mcontext->__ss.__fp = result;
-            }
-            else if (decoded.rt == 30)
-            {
-                uctx->uc_mcontext->__ss.__lr = result;
-            }
-            // rt == 31 is XZR/WZR: the load's result is discarded, nothing to write back.
-
-            arm_thread_state64_set_pc_fptr(uctx->uc_mcontext->__ss, reinterpret_cast<void*>(pc + 4));
+            set_host_gpr(uctx, decoded.rt, result);
+            set_host_pc(uctx, pc + 4);
+            return true;
         }
 
         bool handle_mmio_fault(ucontext_t* uctx, const mmio_region& region, uint64_t fault_addr)
         {
-            const uint64_t pc = arm_thread_state64_get_pc(uctx->uc_mcontext->__ss);
+            const uint64_t pc = get_host_pc(uctx);
             const auto insn = *reinterpret_cast<const uint32_t*>(pc);
             const auto decoded = decode_arm64_load(insn);
             if (!decoded)
             {
+#ifdef __APPLE__
                 // stdio is not async-signal-safe and this runs inside a real signal handler, hence
                 // snprintf into a fixed stack buffer followed by a single write(2).
                 char buf[128];
@@ -2613,13 +2668,13 @@ namespace sogen::fex
                     const auto write_len = static_cast<size_t>(len) < sizeof(buf) ? static_cast<size_t>(len) : sizeof(buf);
                     ::write(STDERR_FILENO, buf, write_len);
                 }
+#endif
                 return false;
             }
 
-            alignas(16) std::byte buffer[16]{};
-            region.read_cb(fault_addr - region.address, buffer, decoded->size);
-            this->complete_decoded_load(uctx, *decoded, buffer, pc);
-            return true;
+            alignas(16) std::array<std::byte, 16> buffer{};
+            region.read_cb(fault_addr - region.address, buffer.data(), decoded->size);
+            return this->complete_decoded_load(uctx, *decoded, buffer.data(), pc);
         }
 
         // LDAR/LDAPR/STLR require natural alignment on real hardware, unlike plain LDR/STR, but x86
@@ -2630,60 +2685,59 @@ namespace sogen::fex
         // order against, making the downgrade to a plain access correctness-preserving.
         bool handle_misaligned_atomic_fault(ucontext_t* uctx, uint64_t fault_addr)
         {
-            const uint64_t pc = arm_thread_state64_get_pc(uctx->uc_mcontext->__ss);
+            const uint64_t pc = get_host_pc(uctx);
             const auto insn = *reinterpret_cast<const uint32_t*>(pc);
 
             if (const auto load = decode_arm64_load(insn))
             {
-                this->complete_decoded_load(uctx, *load, reinterpret_cast<const void*>(fault_addr), pc);
-                return true;
+                return this->complete_decoded_load(uctx, *load, reinterpret_cast<const void*>(fault_addr), pc);
             }
 
             if (const auto store = decode_arm64_store(insn))
             {
-                uint64_t value = 0;
-                if (store->rt <= 28)
-                {
-                    value = uctx->uc_mcontext->__ss.__x[store->rt];
-                }
-                else if (store->rt == 29)
-                {
-                    value = uctx->uc_mcontext->__ss.__fp;
-                }
-                else if (store->rt == 30)
-                {
-                    value = uctx->uc_mcontext->__ss.__lr;
-                }
-                // rt == 31 is XZR: stores zero, matching the default-initialized value above.
-
+                const uint64_t value = host_gpr(uctx, store->rt);
                 std::memcpy(reinterpret_cast<void*>(fault_addr), &value, store->size);
-                arm_thread_state64_set_pc_fptr(uctx->uc_mcontext->__ss, reinterpret_cast<void*>(pc + 4));
+                set_host_pc(uctx, pc + 4);
                 return true;
             }
 
             return false;
         }
 
-        // Real (non-synthetic) guest memory violations, which have no other path to
-        // memory_violation_hooks_: a Windows PAGE_GUARD page, genuinely unmapped memory, or a host page
-        // mprotect'd to PROT_NONE because one 4KB guest slot inside it is guard/unmapped while another
-        // is legitimately mapped. The shadow table for the specific 4KB page decides: an operation
-        // exceeding what is declared there is a real violation and gets deferred to the hooks, otherwise
-        // the access is a false fault from a stricter neighbor sharing the host page and is
-        // decode-and-emulated the same way handle_misaligned_atomic_fault does.
         bool handle_general_memory_violation(ucontext_t* uctx, uint64_t fault_addr)
         {
-            const uint64_t pc = arm_thread_state64_get_pc(uctx->uc_mcontext->__ss);
+            const uint64_t pc = get_host_pc(uctx);
             const auto guest_fault_addr = fault_addr;
+#ifdef __APPLE__
+            // Apple Silicon host pages are 16KB, so the 4KB guest-page shadow is authoritative when
+            // neighboring guest pages require different permissions within one host page.
             const auto guest_page = guest_fault_addr & ~(page_size - 1);
             const auto shadow_it = this->page_shadow_apple_.find(guest_page);
             const auto declared = (shadow_it != this->page_shadow_apple_.end()) ? shadow_it->second : memory_permission::none;
+#else
+            const auto region_it = this->find_region_containing(guest_fault_addr);
+            const auto declared = region_it != this->regions_.end() ? region_it->second.permissions : memory_permission::none;
+#endif
 
             memory_operation operation = memory_operation::exec;
             if (fault_addr != pc)
             {
-                const auto insn = *reinterpret_cast<const uint32_t*>(pc);
-                operation = decode_arm64_store(insn) ? memory_operation::write : memory_operation::read;
+#ifdef __ANDROID__
+                // The emulation decoder below is intentionally limited to the ordered STLR-family
+                // instructions that can fault for alignment. Ordinary translated STR/STUR stores must
+                // still be reported as writes on real protection faults, so use the kernel-provided
+                // AArch64 ESR WnR bit for access classification instead of broadening that decoder.
+                constexpr uint64_t esr_write_not_read = 1ULL << 6;
+                if (const auto* esr = find_aarch64_context<esr_context>(uctx, ESR_MAGIC))
+                {
+                    operation = (esr->esr & esr_write_not_read) != 0 ? memory_operation::write : memory_operation::read;
+                }
+                else
+#endif
+                {
+                    const auto insn = *reinterpret_cast<const uint32_t*>(pc);
+                    operation = decode_arm64_store(insn) ? memory_operation::write : memory_operation::read;
+                }
             }
 
             if ((declared & operation) == operation)
@@ -2732,16 +2786,22 @@ namespace sogen::fex
             {
                 const auto fault_addr = reinterpret_cast<uint64_t>(info->si_addr);
 
+#ifdef __APPLE__
                 // Must run before any si_code-specific branch below, because Darwin can report this
                 // PROT_NONE violation as BUS_ADRALN instead of SEGV_ACCERR/SEGV_MAPERR. Since
                 // InterruptFaultPage is never inside the CodeBuffer, a misclassified fault would
                 // otherwise fall through to handle_general_memory_violation, which treats fault_addr as
                 // a guest address and would dispatch a synthetic guest exception built from this
                 // backend's own internal pointer.
+#endif
+#ifdef __ANDROID__
+                const auto interrupt_page_addr = get_untagged_pointer_address(this->thread_->InterruptFaultPage);
+#else
                 const auto interrupt_page_addr = reinterpret_cast<uint64_t>(this->thread_->InterruptFaultPage);
+#endif
                 if (fault_addr >= interrupt_page_addr && fault_addr < interrupt_page_addr + sizeof(this->thread_->InterruptFaultPage))
                 {
-                    const auto fault_pc = arm_thread_state64_get_pc(uctx->uc_mcontext->__ss);
+                    const auto fault_pc = get_host_pc(uctx);
                     const bool is_dispatch_code = this->context_ && this->context_->IsAddressInCodeBuffer(this->thread_, fault_pc);
 
                     // ExitFunctionLinkerAddress's own epilogue (EmitSignalGuardedRegion's closing
@@ -2769,8 +2829,7 @@ namespace sogen::fex
                         this->thread_->CurrentFrame->State.rip = this->context_->RestoreRIPFromHostPC(this->thread_, fault_pc);
                         this->interrupt_page_unwind_ = true;
                         const auto& stop_cfg = this->signal_delegator_->GetConfig();
-                        arm_thread_state64_set_pc_fptr(uctx->uc_mcontext->__ss,
-                                                       reinterpret_cast<void*>(stop_cfg.ThreadStopHandlerAddressSpillSRA));
+                        set_host_pc(uctx, stop_cfg.ThreadStopHandlerAddressSpillSRA);
                         return true;
                     }
 
@@ -2781,10 +2840,11 @@ namespace sogen::fex
                     // corrupts the stack into a pc==lr==0 crash. Only the page's protection state drives
                     // the stop mechanism, not the stored value, so skip the faulting store; the next real
                     // block entry still sees the page protected and stops correctly.
-                    arm_thread_state64_set_pc_fptr(uctx->uc_mcontext->__ss, reinterpret_cast<void*>(fault_pc + 4));
+                    set_host_pc(uctx, fault_pc + 4);
                     return true;
                 }
 
+#ifdef __APPLE__
                 // A W^X instruction-fetch fault on FEXCore's dispatcher trampoline: it is host MAP_JIT
                 // code like a CodeBuffer, but IsAddressInCodeBuffer does not recognize it, so the
                 // CodeBuffer-gated retries below never fire for it, and this handler's other retry paths
@@ -2798,13 +2858,14 @@ namespace sogen::fex
                 // budget would instead drop the fault into handle_general_memory_violation, which would
                 // mis-read the host dispatcher address as a guest access violation.
                 {
-                    const auto host_pc = arm_thread_state64_get_pc(uctx->uc_mcontext->__ss);
+                    const auto host_pc = get_host_pc(uctx);
                     if (fault_addr == host_pc && this->host_pc_in_dispatcher(host_pc))
                     {
                         ::pthread_jit_write_protect_np(1);
                         return true;
                     }
                 }
+#endif
 
                 // Checked early, before the general-violation routing that would otherwise mis-dispatch
                 // this host arena address as a guest access violation.
@@ -2818,7 +2879,7 @@ namespace sogen::fex
                 // to a garbage pc can land inside a registered mmio_region by chance; handle_mmio_fault
                 // would then try to decode the instruction at that same garbage address and crash there
                 // instead, masking the real bug behind a confusing secondary symptom.
-                const auto pc_for_mmio_check = arm_thread_state64_get_pc(uctx->uc_mcontext->__ss);
+                const auto pc_for_mmio_check = get_host_pc(uctx);
                 if (fault_addr != pc_for_mmio_check)
                 {
                     for (const auto& region : this->mmio_regions_)
@@ -2830,6 +2891,7 @@ namespace sogen::fex
                     }
                 }
 
+#ifdef __APPLE__
                 // A BUS_ADRALN whose address is inside the live CodeBuffer but whose PC is FEXCore's own
                 // host C++ code (ExitFunctionLink's self-modifying write) is not a real alignment fault
                 // at all - it decodes to an ordinary aligned 32-bit `str`. It is the JIT W^X race, which
@@ -2864,29 +2926,37 @@ namespace sogen::fex
                 {
                     return true;
                 }
+#endif
             }
 
-            // FEXCore protects the last host page of each CodeBuffer and deliberately writes into it
-            // mid-compile to detect running out of space, so this is expected: resume via the jump
-            // buffer it set up beforehand, mirroring SignalDelegator.cpp's HandleFrontendSIGSEGV.
-            // Unlike Linux's single SIGSEGV, Darwin reports these as either SIGSEGV or SIGBUS, and
-            // sometimes as SEGV_MAPERR ("not mapped") rather than SEGV_ACCERR ("wrong permission") -
-            // confirmed by querying mach_vm_region from inside this handler and finding the address
-            // fully mapped RWX despite the si_code=1 report - so both si_codes are treated alike.
+#ifdef __APPLE__
             if ((sig == SIGSEGV || sig == SIGBUS) && (info->si_code == SEGV_ACCERR || info->si_code == SEGV_MAPERR))
+#else
+            if (sig == SIGSEGV || sig == SIGBUS)
+#endif
             {
                 const auto guard_page = this->thread_->JITGuardPage;
                 const auto fault_addr = reinterpret_cast<uintptr_t>(info->si_addr);
                 if (guard_page != 0 && fault_addr >= guard_page && fault_addr < guard_page + FEXCore::Utils::FEX_HOST_PAGE_SIZE)
                 {
+#ifdef __APPLE__
                     auto* gprs = reinterpret_cast<uint64_t*>(&uctx->uc_mcontext->__ss);
-                    auto* fprs = reinterpret_cast<__uint128_t*>(&uctx->uc_mcontext->__ns.__v[0]);
                     auto* pc_ptr = reinterpret_cast<uint64_t*>(&uctx->uc_mcontext->__ss.__pc);
+#else
+                    auto* gprs = reinterpret_cast<uint64_t*>(uctx->uc_mcontext.regs);
+                    auto* pc_ptr = reinterpret_cast<uint64_t*>(&uctx->uc_mcontext.pc);
+#endif
+                    auto* fprs = host_vector_registers(uctx);
+                    if (fprs == nullptr)
+                    {
+                        return false;
+                    }
                     FEXCore::UncheckedLongJump::ManuallyLoadJumpBuf(this->thread_->RestartJump, this->thread_->JITGuardOverflowArgument,
                                                                     gprs, fprs, pc_ptr);
                     return true;
                 }
 
+#ifdef __APPLE__
                 // FEXCore's code-patching paths (ExitFunctionLink, block delinkers) do not reliably
                 // leave this thread's JIT write-protect state correct across their self-modifying
                 // writes, so set whatever the faulting access needs and retry the same instruction.
@@ -2904,15 +2974,16 @@ namespace sogen::fex
                     if (retry_count < max_write_protect_retries)
                     {
                         ++retry_count;
-                        const uint64_t faulting_pc = arm_thread_state64_get_pc(uctx->uc_mcontext->__ss);
+                        const uint64_t faulting_pc = get_host_pc(uctx);
                         const bool is_instruction_fetch = (faulting_pc == fault_addr_u64);
                         ::pthread_jit_write_protect_np(is_instruction_fetch ? 1 : 0);
                         return true;
                     }
                 }
+#endif
             }
 
-            const uint64_t pc = arm_thread_state64_get_pc(uctx->uc_mcontext->__ss);
+            const uint64_t pc = get_host_pc(uctx);
 
             // FEXCore's guest-exception trampoline always re-enters within the dispatcher range.
             if (!this->host_pc_in_dispatcher(pc))
@@ -2992,263 +3063,6 @@ namespace sogen::fex
             // SRA is already spilled: this is FEXCore's own controlled synthetic-exception/Break-op
             // path, not an arbitrary interruption of live JIT code.
             this->defer_hook_dispatch(uctx, dispatch, /*sra_already_spilled=*/true);
-            return true;
-        }
-#elif defined(__ANDROID__)
-      public:
-        static bool complete_decoded_load(ucontext_t* context, const decoded_arm64_load& decoded, const void* data, uint64_t pc)
-        {
-            if (decoded.is_vector)
-            {
-                auto* fpsimd = find_aarch64_context<fpsimd_context>(context, FPSIMD_MAGIC);
-                if (fpsimd == nullptr)
-                {
-                    return false;
-                }
-
-                __uint128_t value{};
-                std::memcpy(&value, data, sizeof(value));
-                fpsimd->vregs[decoded.rt] = value;
-                context->uc_mcontext.pc = pc + 4;
-                return true;
-            }
-
-            uint64_t raw_value = 0;
-            std::memcpy(&raw_value, data, decoded.size);
-
-            uint64_t result = 0;
-            switch (decoded.size)
-            {
-            case 1:
-                result = decoded.sign_extend ? static_cast<uint64_t>(static_cast<int64_t>(static_cast<int8_t>(raw_value)))
-                                             : (raw_value & 0xFFULL);
-                break;
-            case 2:
-                result = decoded.sign_extend ? static_cast<uint64_t>(static_cast<int64_t>(static_cast<int16_t>(raw_value)))
-                                             : (raw_value & 0xFFFFULL);
-                break;
-            case 4:
-                result = decoded.sign_extend ? static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(raw_value)))
-                                             : (raw_value & 0xFFFFFFFFULL);
-                break;
-            default:
-                result = raw_value;
-                break;
-            }
-
-            if (!decoded.dest_is_64bit)
-            {
-                result &= 0xFFFFFFFFULL;
-            }
-
-            if (decoded.rt < 31)
-            {
-                context->uc_mcontext.regs[decoded.rt] = result;
-            }
-            context->uc_mcontext.pc = pc + 4;
-            return true;
-        }
-
-        bool handle_mmio_fault(ucontext_t* context, const mmio_region& region, uint64_t fault_address)
-        {
-            const uint64_t pc = context->uc_mcontext.pc;
-            const auto decoded = decode_arm64_load(*reinterpret_cast<const uint32_t*>(pc));
-            if (!decoded)
-            {
-                return false;
-            }
-
-            alignas(16) std::array<std::byte, 16> buffer{};
-            region.read_cb(fault_address - region.address, buffer.data(), decoded->size);
-            return complete_decoded_load(context, *decoded, buffer.data(), pc);
-        }
-
-        bool handle_misaligned_atomic_fault(ucontext_t* context, uint64_t fault_address)
-        {
-            const uint64_t pc = context->uc_mcontext.pc;
-            const auto instruction = *reinterpret_cast<const uint32_t*>(pc);
-
-            if (const auto load = decode_arm64_load(instruction))
-            {
-                return complete_decoded_load(context, *load, reinterpret_cast<const void*>(fault_address), pc);
-            }
-
-            if (const auto store = decode_arm64_store(instruction))
-            {
-                const uint64_t value = store->rt < 31 ? context->uc_mcontext.regs[store->rt] : 0;
-                std::memcpy(reinterpret_cast<void*>(fault_address), &value, store->size);
-                context->uc_mcontext.pc = pc + 4;
-                return true;
-            }
-
-            return false;
-        }
-
-        memory_permission permissions_at(uint64_t address) const
-        {
-            const auto it = this->find_region_containing(address);
-            return it != this->regions_.end() ? it->second.permissions : memory_permission::none;
-        }
-
-        bool handle_general_memory_violation(ucontext_t* context, uint64_t fault_address)
-        {
-            const uint64_t pc = context->uc_mcontext.pc;
-            const auto permissions = this->permissions_at(fault_address);
-
-            memory_operation operation = memory_operation::exec;
-            if (fault_address != pc)
-            {
-                // The emulation decoder below is intentionally limited to the ordered STLR-family
-                // instructions that can fault for alignment. Ordinary translated STR/STUR stores must
-                // still be reported as writes on real protection faults, so use the kernel-provided
-                // AArch64 ESR WnR bit for access classification instead of broadening that decoder.
-                constexpr uint64_t esr_write_not_read = 1ULL << 6;
-                if (const auto* esr = find_aarch64_context<esr_context>(context, ESR_MAGIC))
-                {
-                    operation = (esr->esr & esr_write_not_read) != 0 ? memory_operation::write : memory_operation::read;
-                }
-                else
-                {
-                    // Keep the prior fallback for kernels that omit ESR context records.
-                    const auto instruction = *reinterpret_cast<const uint32_t*>(pc);
-                    operation = decode_arm64_store(instruction) ? memory_operation::write : memory_operation::read;
-                }
-            }
-
-            if ((permissions & operation) == operation)
-            {
-                return this->handle_misaligned_atomic_fault(context, fault_address);
-            }
-
-            if (const uint64_t guest_rip = this->context_->RestoreRIPFromHostPC(this->thread_, pc))
-            {
-                this->thread_->CurrentFrame->State.rip = guest_rip;
-            }
-
-            pending_fault_dispatch dispatch{};
-            dispatch.kind = pending_fault_kind::memory_violation;
-            dispatch.address = fault_address;
-            dispatch.size = 1;
-            dispatch.operation = operation;
-            dispatch.type = permissions == memory_permission::none ? memory_violation_type::unmapped : memory_violation_type::protection;
-            this->defer_hook_dispatch(context, dispatch, false);
-            return true;
-        }
-
-        bool handle_fault_signal(int sig, siginfo_t* info, void* raw_context)
-        {
-            if (this->thread_ == nullptr)
-            {
-                return false;
-            }
-
-            auto* context = static_cast<ucontext_t*>(raw_context);
-            const uint64_t pc = context->uc_mcontext.pc;
-            const auto fault_address = reinterpret_cast<uint64_t>(info->si_addr);
-
-            if (sig == SIGSEGV || sig == SIGBUS)
-            {
-                const uint64_t interrupt_page = get_untagged_pointer_address(this->thread_->InterruptFaultPage);
-                if (fault_address >= interrupt_page && fault_address < interrupt_page + sizeof(this->thread_->InterruptFaultPage))
-                {
-                    const bool in_jit = this->context_->IsAddressInCodeBuffer(this->thread_, pc);
-                    const bool epilogue_byte_store = (*reinterpret_cast<const uint32_t*>(pc) & 0xFFC00000u) == 0x39000000u;
-                    if (in_jit && !epilogue_byte_store)
-                    {
-                        this->thread_->CurrentFrame->State.rip = this->context_->RestoreRIPFromHostPC(this->thread_, pc);
-                        this->interrupt_page_unwind_ = true;
-                        context->uc_mcontext.pc = this->signal_delegator_->GetConfig().ThreadStopHandlerAddressSpillSRA;
-                        return true;
-                    }
-
-                    context->uc_mcontext.pc = pc + 4;
-                    return true;
-                }
-
-                if (this->handle_callret_stack_fault(context, fault_address))
-                {
-                    return true;
-                }
-
-                if (fault_address != pc)
-                {
-                    for (const auto& region : this->mmio_regions_)
-                    {
-                        if (fault_address >= region.address && fault_address < region.address + region.size)
-                        {
-                            return this->handle_mmio_fault(context, region, fault_address);
-                        }
-                    }
-                }
-
-                const auto guard_page = this->thread_->JITGuardPage;
-                if (guard_page != 0 && fault_address >= guard_page && fault_address < guard_page + FEXCore::Utils::FEX_HOST_PAGE_SIZE)
-                {
-                    auto* fpsimd = find_aarch64_context<fpsimd_context>(context, FPSIMD_MAGIC);
-                    if (fpsimd == nullptr)
-                    {
-                        return false;
-                    }
-                    FEXCore::UncheckedLongJump::ManuallyLoadJumpBuf(this->thread_->RestartJump, this->thread_->JITGuardOverflowArgument,
-                                                                    reinterpret_cast<uint64_t*>(context->uc_mcontext.regs), fpsimd->vregs,
-                                                                    reinterpret_cast<uint64_t*>(&context->uc_mcontext.pc));
-                    return true;
-                }
-            }
-
-            if (!this->host_pc_in_dispatcher(pc))
-            {
-                if ((sig == SIGSEGV || sig == SIGBUS) && this->context_->IsAddressInCodeBuffer(this->thread_, pc))
-                {
-                    return this->handle_general_memory_violation(context, fault_address);
-                }
-                return false;
-            }
-
-            auto* frame = this->thread_->CurrentFrame;
-            if (!frame->SynchronousFaultData.FaultToTopAndGeneratedException)
-            {
-                return false;
-            }
-
-            auto vector = static_cast<int>(frame->SynchronousFaultData.TrapNo);
-            constexpr int gp_fault_vector = 13;
-            constexpr uint32_t idt_reference_bit = 0x2;
-            if (vector == gp_fault_vector && (frame->SynchronousFaultData.err_code & idt_reference_bit) != 0)
-            {
-                vector = static_cast<int>(frame->SynchronousFaultData.err_code >> 3);
-            }
-            frame->SynchronousFaultData.FaultToTopAndGeneratedException = false;
-
-            pending_fault_dispatch dispatch{};
-            if (vector == 14)
-            {
-                const auto error_code = frame->SynchronousFaultData.err_code;
-                dispatch.kind = pending_fault_kind::memory_violation;
-                dispatch.address = frame->State.rip;
-                dispatch.size = 1;
-                dispatch.operation = memory_operation::read;
-                if ((error_code & 0x10) != 0)
-                {
-                    dispatch.operation = memory_operation::exec;
-                }
-                else if ((error_code & 0x2) != 0)
-                {
-                    dispatch.operation = memory_operation::write;
-                }
-                dispatch.type = (error_code & 0x1) != 0 ? memory_violation_type::protection : memory_violation_type::unmapped;
-            }
-            else
-            {
-                if (frame->SynchronousFaultData.TrapNo == FEXCore::X86State::X86_TRAPNO_BP)
-                {
-                    frame->State.rip -= 1;
-                }
-                dispatch.kind = pending_fault_kind::interrupt;
-                dispatch.vector = vector;
-            }
-
-            this->defer_hook_dispatch(context, dispatch, true);
             return true;
         }
 #endif
