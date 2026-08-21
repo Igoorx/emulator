@@ -34,18 +34,19 @@ namespace sogen::test
         constexpr uint64_t host_pattern = 0x1122334455667788ull;
         std::memcpy(host_ptr, &host_pattern, sizeof(host_pattern));
 
-        uint64_t src = 0;
+        const uint64_t src = mm.find_free_allocation_base(page);
+        ASSERT_NE(src, 0u);
+
         try
         {
-            src = mm.allocate_host_memory(page, host_ptr, memory_permission::read_write);
+            if (!mm.allocate_host_memory_at(src, page, host_ptr, memory_permission::read_write))
+            {
+                GTEST_SKIP() << "allocate_host_memory failed";
+            }
         }
         catch (const std::exception& e)
         {
             GTEST_SKIP() << "backend does not support host memory mapping: " << e.what();
-        }
-        if (src == 0)
-        {
-            GTEST_SKIP() << "allocate_host_memory failed";
         }
 
         // host -> guest: the guest-visible range reflects the host buffer.

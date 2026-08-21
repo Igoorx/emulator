@@ -324,6 +324,34 @@ namespace sogen
         return true;
     }
 
+    bool memory_manager::allocate_host_memory_at(const uint64_t address, const size_t size, void* host_pointer,
+                                                 const nt_memory_permission permissions)
+    {
+        if (this->overlaps_reserved_region(address, size))
+        {
+            return false;
+        }
+
+        this->map_host_memory(address, size, host_pointer, this->get_effective_permissions(permissions));
+
+        const auto entry = this->reserved_regions_
+                               .try_emplace(address,
+                                            reserved_region{
+                                                .length = size,
+                                                .kind = memory_region_kind::mmio,
+                                            })
+                               .first;
+
+        entry->second.committed_regions[address] = committed_region{
+            .length = size,
+            .permissions = permissions,
+        };
+
+        this->update_layout_version();
+
+        return true;
+    }
+
     uint64_t memory_manager::allocate_host_memory(const size_t size, void* host_pointer, const nt_memory_permission permissions)
     {
         if (size == 0 || host_pointer == nullptr)
@@ -355,7 +383,14 @@ namespace sogen
 
         try
         {
-            this->map_host_memory(address, size, host_pointer, this->get_effective_permissions(permissions));
+            if (!this->allocate_host_memory_at(address, size, host_pointer, permissions))
+            {
+                if (!uses_existing_host_mapping)
+                {
+                    this->release_host_claims(address + size);
+                }
+                return 0;
+            }
         }
         catch (...)
         {
@@ -365,21 +400,6 @@ namespace sogen
             }
             throw;
         }
-
-        const auto entry = this->reserved_regions_
-                               .try_emplace(address,
-                                            reserved_region{
-                                                .length = size,
-                                                .kind = memory_region_kind::mmio,
-                                            })
-                               .first;
-
-        entry->second.committed_regions[address] = committed_region{
-            .length = size,
-            .permissions = permissions,
-        };
-
-        this->update_layout_version();
 
         return address;
     }
