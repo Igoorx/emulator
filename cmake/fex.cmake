@@ -22,6 +22,12 @@ if(SOGEN_ENABLE_FEX)
   else()
     set(_FEXCORE_TOOLCHAIN_ARGS "")
   endif()
+  if(CMAKE_SYSTEM_NAME STREQUAL "Android")
+    list(APPEND _FEXCORE_TOOLCHAIN_ARGS
+      -DANDROID_ABI:STRING=${CMAKE_ANDROID_ARCH_ABI}
+      -DANDROID_PLATFORM:STRING=${CMAKE_SYSTEM_VERSION}
+    )
+  endif()
 
   # Propagate AddressSanitizer into the FEXCore build so the whole chain is instrumented
   # consistently (mismatched ASan instrumentation across shared libraries causes false positives).

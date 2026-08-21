@@ -45,7 +45,13 @@ namespace sogen
             using x_set_input_focus = int (*)(void*, unsigned long, int, unsigned long);
             using x_flush = int (*)(void*);
 
-            static auto* x11 = SDL_LoadObject("libX11.so");
+            static auto* x11 = [] {
+                if (auto* library = SDL_LoadObject("libX11.so.6"))
+                {
+                    return library;
+                }
+                return SDL_LoadObject("libX11.so");
+            }();
             static auto get_input_focus = x11 ? reinterpret_cast<x_get_input_focus>(SDL_LoadFunction(x11, "XGetInputFocus")) : nullptr;
             static auto set_input_focus = x11 ? reinterpret_cast<x_set_input_focus>(SDL_LoadFunction(x11, "XSetInputFocus")) : nullptr;
             static auto flush = x11 ? reinterpret_cast<x_flush>(SDL_LoadFunction(x11, "XFlush")) : nullptr;
@@ -1016,6 +1022,18 @@ namespace sogen
                 this->queue_or_run([this, window] {
                     if (const auto it = this->windows_.find(window); it != this->windows_.end())
                     {
+                        std::erase_if(this->pending_key_releases_, [this, window](const pending_key_release& release) {
+                            if (release.window != window)
+                            {
+                                return false;
+                            }
+                            if (release.scancode_index < this->key_down_.size())
+                            {
+                                this->key_down_[release.scancode_index] = false;
+                            }
+                            return true;
+                        });
+
                         auto* focus_fallback = this->find_focus_fallback(it->second);
                         // Child (non-top-level) windows have no SDL window; only top-level windows do.
                         if (it->second.window)

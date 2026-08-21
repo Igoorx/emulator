@@ -289,6 +289,68 @@ namespace sogen::test
             GTEST_SKIP() << "FEX backend is not available";
         }
     }
+
+    TEST(FexSignalTest, PreviousNonOnStackHandlerDoesNotUseAlternateStack)
+    {
+        struct sigaction original_action{};
+        ASSERT_EQ(::sigaction(SIGTRAP, nullptr, &original_action), 0);
+
+        stack_t original_stack{};
+        ASSERT_EQ(::sigaltstack(nullptr, &original_stack), 0);
+
+        constexpr size_t application_alt_stack_size = 64 * 1024;
+        const auto application_alt_stack = std::make_unique<std::byte[]>(application_alt_stack_size);
+        stack_t application_stack{};
+        application_stack.ss_sp = application_alt_stack.get();
+        application_stack.ss_size = application_alt_stack_size;
+        ASSERT_EQ(::sigaltstack(&application_stack, nullptr), 0);
+
+        struct sigaction previous_action{};
+        previous_action.sa_handler = previous_sigtrap_handler;
+        sigemptyset(&previous_action.sa_mask);
+        ASSERT_EQ(::sigaction(SIGTRAP, &previous_action, nullptr), 0);
+
+        previous_sigtrap_count = 0;
+        previous_sigtrap_on_expected_stack = 0;
+        expected_signal_stack_begin = reinterpret_cast<uintptr_t>(application_alt_stack.get());
+        expected_signal_stack_end = expected_signal_stack_begin + application_alt_stack_size;
+
+        auto emu = try_create_fex_emulator();
+        const bool backend_available = emu != nullptr;
+        if (emu)
+        {
+            struct sigaction emulator_action{};
+            ASSERT_EQ(::sigaction(SIGTRAP, nullptr, &emulator_action), 0);
+            EXPECT_NE(emulator_action.sa_handler, previous_sigtrap_handler);
+            EXPECT_NE(emulator_action.sa_flags & SA_SIGINFO, 0);
+            EXPECT_EQ(emulator_action.sa_flags & SA_ONSTACK, 0);
+
+            stack_t emulator_stack{};
+            ASSERT_EQ(::sigaltstack(nullptr, &emulator_stack), 0);
+            EXPECT_EQ(emulator_stack.ss_sp, application_stack.ss_sp);
+            EXPECT_EQ(emulator_stack.ss_size, application_stack.ss_size);
+
+            EXPECT_EQ(::raise(SIGTRAP), 0);
+            EXPECT_EQ(previous_sigtrap_count, 1);
+            EXPECT_EQ(previous_sigtrap_on_expected_stack, 0);
+            emu.reset();
+
+            stack_t restored_stack{};
+            EXPECT_EQ(::sigaltstack(nullptr, &restored_stack), 0);
+            EXPECT_EQ(restored_stack.ss_sp, application_stack.ss_sp);
+            EXPECT_EQ(restored_stack.ss_size, application_stack.ss_size);
+        }
+
+        expected_signal_stack_begin = 0;
+        expected_signal_stack_end = 0;
+        ::sigaction(SIGTRAP, &original_action, nullptr);
+        ::sigaltstack(&original_stack, nullptr);
+
+        if (!backend_available)
+        {
+            GTEST_SKIP() << "FEX backend is not available";
+        }
+    }
 #endif
 
     TEST(FexRegisterTest, ExtendedGprSubRegisterWrites)

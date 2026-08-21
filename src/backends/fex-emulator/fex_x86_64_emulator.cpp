@@ -786,10 +786,15 @@ namespace sogen::fex
             size_t installed_signal_count = 0;
             for (; installed_signal_count < fault_signals.size(); ++installed_signal_count)
             {
+                const auto& previous_action = previous_fault_signal_actions[installed_signal_count];
+                const bool previous_handler_is_callable = previous_action.sa_handler != SIG_DFL && previous_action.sa_handler != SIG_IGN;
+                const int stack_flag = !previous_handler_is_callable || (previous_action.sa_flags & SA_ONSTACK) != 0 ? SA_ONSTACK : 0;
+
                 // SA_RESTART affects the interrupted host operation after our handler returns, so carry
-                // it through from the embedding application's disposition. The other handler-control
-                // flags are reproduced explicitly when an unhandled signal is chained below.
-                action.sa_flags = SA_SIGINFO | SA_ONSTACK | (previous_fault_signal_actions[installed_signal_count].sa_flags & SA_RESTART);
+                // it through from the embedding application's disposition. A callable previous handler
+                // is invoked directly, so preserve its SA_ONSTACK choice too; otherwise keep FEX on the
+                // alternate stack so faults do not depend on a possibly exhausted host stack.
+                action.sa_flags = SA_SIGINFO | stack_flag | (previous_action.sa_flags & SA_RESTART);
                 if (::sigaction(fault_signals[installed_signal_count], &action, nullptr) != 0)
                 {
                     bool restored = true;
