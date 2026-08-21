@@ -91,8 +91,16 @@ namespace sogen::test
         constexpr size_t page_size = 0x1000;
         const uint64_t code = memory.allocate_memory(page_size, memory_permission::read_write);
         const uint64_t target = memory.allocate_memory(page_size, memory_permission::read_write);
+        const uint64_t gdt = memory.allocate_memory(page_size, memory_permission::read_write);
         ASSERT_NE(code, 0u);
         ASSERT_NE(target, 0u);
+        ASSERT_NE(gdt, 0u);
+
+        constexpr uint16_t long_mode_code_selector = 0x08;
+        constexpr uint64_t long_mode_code_descriptor = 0x00AF9B000000FFFF;
+        emu->write_memory<uint64_t>(gdt + long_mode_code_selector, long_mode_code_descriptor);
+        emu->load_gdt(gdt, page_size);
+        emu->reg<uint16_t>(x86_register::cs, long_mode_code_selector);
 
         // mov [rax], rbx; hlt. The translated store is an ordinary guest store; the Android fault
         // classifier must not depend on the deliberately narrow STLR-family emulation decoder.
