@@ -2,6 +2,7 @@
 #include <platform/ui_backend.hpp>
 
 #include <SDL3/SDL.h>
+
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -29,6 +30,56 @@ namespace sogen
             SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(icon));
         }
 #endif
+
+        // X11 can run without a window manager to process SDL's SetKeyboardFocus request. Use XSetInputFocus
+        // instead, but only when no external X11 client owns the focus.
+        void apply_x11_focus_fallback(SDL_Window* window)
+        {
+            const auto* driver = SDL_GetCurrentVideoDriver();
+            if (!driver || std::string_view{driver} != "x11")
+            {
+                return;
+            }
+
+            using x_get_input_focus = int (*)(void*, unsigned long*, int*);
+            using x_set_input_focus = int (*)(void*, unsigned long, int, unsigned long);
+            using x_flush = int (*)(void*);
+
+            static auto* x11 = SDL_LoadObject("libX11.so");
+            static auto get_input_focus = x11 ? reinterpret_cast<x_get_input_focus>(SDL_LoadFunction(x11, "XGetInputFocus")) : nullptr;
+            static auto set_input_focus = x11 ? reinterpret_cast<x_set_input_focus>(SDL_LoadFunction(x11, "XSetInputFocus")) : nullptr;
+            static auto flush = x11 ? reinterpret_cast<x_flush>(SDL_LoadFunction(x11, "XFlush")) : nullptr;
+            if (!get_input_focus || !set_input_focus || !flush)
+            {
+                return;
+            }
+
+            const auto properties = SDL_GetWindowProperties(window);
+            auto* display = SDL_GetPointerProperty(properties, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, nullptr);
+            const auto xwindow = static_cast<unsigned long>(SDL_GetNumberProperty(properties, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0));
+            if (display && xwindow != 0)
+            {
+                unsigned long focused_window{};
+                int revert_to{};
+                get_input_focus(display, &focused_window, &revert_to);
+                constexpr unsigned long no_focus = 0;
+                constexpr unsigned long pointer_root = 1;
+
+                auto* focused_sdl_window = SDL_GetKeyboardFocus();
+                const auto focused_sdl_properties = focused_sdl_window ? SDL_GetWindowProperties(focused_sdl_window) : 0;
+                const bool own_window_has_focus =
+                    focused_sdl_properties &&
+                    SDL_GetPointerProperty(focused_sdl_properties, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, nullptr) == display &&
+                    static_cast<unsigned long>(SDL_GetNumberProperty(focused_sdl_properties, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0)) ==
+                        focused_window;
+
+                if (focused_window == no_focus || focused_window == pointer_root || own_window_has_focus)
+                {
+                    set_input_focus(display, xwindow, 2, 0);
+                    flush(display);
+                }
+            }
+        }
 
         std::string make_host_window_title(const std::u16string_view title)
         {
@@ -821,6 +872,10 @@ namespace sogen
                         {
                             if (const auto guest = this->resolve_guest(event.button.windowID); guest != 0)
                             {
+                                if (auto* state = this->resolve_window(guest); state && state->window)
+                                {
+                                    apply_x11_focus_fallback(state->window);
+                                }
                                 this->set_window_active(guest, true);
                                 this->mouse_button_state_ |= sdl_mouse_button_to_mk(event.button.button);
                                 this->post_event(guest, message, mouse_button_wparam(this->mouse_button_state_, event.button.button),
@@ -943,6 +998,10 @@ namespace sogen
 
                 SDL_SetWindowPosition(window, desc.rect.left, desc.rect.top);
                 SDL_StartTextInput(window);
+                if ((flags & SDL_WINDOW_HIDDEN) == 0)
+                {
+                    apply_x11_focus_fallback(window);
+                }
 
                 auto& state = this->windows_[desc.handle];
                 state.desc = desc;
@@ -957,6 +1016,7 @@ namespace sogen
                 this->queue_or_run([this, window] {
                     if (const auto it = this->windows_.find(window); it != this->windows_.end())
                     {
+                        auto* focus_fallback = this->find_focus_fallback(it->second);
                         // Child (non-top-level) windows have no SDL window; only top-level windows do.
                         if (it->second.window)
                         {
@@ -965,6 +1025,10 @@ namespace sogen
                         }
                         destroy_window_resources(it->second);
                         this->windows_.erase(it);
+                        if (focus_fallback)
+                        {
+                            apply_x11_focus_fallback(focus_fallback);
+                        }
                     }
                 });
             }
@@ -998,10 +1062,16 @@ namespace sogen
                             if (visible)
                             {
                                 SDL_ShowWindow(state->window);
+                                apply_x11_focus_fallback(state->window);
                             }
                             else
                             {
+                                auto* focus_fallback = this->find_focus_fallback(*state);
                                 SDL_HideWindow(state->window);
+                                if (focus_fallback)
+                                {
+                                    apply_x11_focus_fallback(focus_fallback);
+                                }
                             }
                         }
                         this->redraw_related(window);
@@ -1227,6 +1297,20 @@ namespace sogen
             {
                 const auto it = this->windows_.find(window);
                 return it == this->windows_.end() ? nullptr : &it->second;
+            }
+
+            SDL_Window* find_focus_fallback(const window_state& state)
+            {
+                if (state.desc.owner != 0)
+                {
+                    const auto owner = this->get_top_level_ancestor(state.desc.owner);
+                    if (auto* owner_state = this->resolve_window(owner); owner_state && owner_state->window && owner_state->desc.visible)
+                    {
+                        return owner_state->window;
+                    }
+                }
+
+                return nullptr;
             }
 
             hwnd get_top_level_ancestor(hwnd window) const
