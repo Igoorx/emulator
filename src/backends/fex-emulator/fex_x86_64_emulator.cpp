@@ -18,8 +18,9 @@
 // through a FEXCore::HLE::SyscallHandler that invokes the registered syscall instruction hook.
 //
 // The functional targets are Darwin on Apple Silicon and Android on AArch64; the signal handlers and
-// MMIO fault emulation below support both. The 16KB/4KB page reconciliation and MAP_JIT handling are
-// Darwin-only. Other AArch64 Linux hosts have build coverage only.
+// MMIO fault emulation below support both. Android currently requires a 4KB host page; the 16KB/4KB
+// page reconciliation and MAP_JIT handling are Darwin-only. Other AArch64 Linux hosts have build
+// coverage only.
 
 #include <cstdlib>
 #include <pthread.h>
@@ -45,13 +46,13 @@
 #include <array>
 #include <bit>
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <exception>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <set>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -82,6 +83,52 @@ namespace sogen::fex
     namespace
     {
         constexpr size_t page_size = 0x1000;
+
+#ifdef __ANDROID__
+        constexpr uint64_t guest_address_space_end = 0x00007ffffffeffffULL + 1;
+
+#ifndef MAP_FIXED_NOREPLACE
+        constexpr int MAP_FIXED_NOREPLACE = 0x100000;
+#endif
+
+        std::vector<host_reserved_range> read_host_mappings_android(const uint64_t window_start, const uint64_t window_end)
+        {
+            std::unique_ptr<FILE, decltype(&::fclose)> maps{::fopen("/proc/self/maps", "r"), &::fclose};
+            if (!maps)
+            {
+                throw std::runtime_error("FEX backend failed to enumerate Android host mappings");
+            }
+
+            std::vector<host_reserved_range> ranges;
+            char line[512];
+            while (::fgets(line, sizeof(line), maps.get()) != nullptr)
+            {
+                unsigned long long mapping_start = 0;
+                unsigned long long mapping_end = 0;
+                if (::sscanf(line, "%llx-%llx", &mapping_start, &mapping_end) != 2)
+                {
+                    continue;
+                }
+
+                const uint64_t hit_start = std::max<uint64_t>(mapping_start, window_start);
+                const uint64_t hit_end = std::min<uint64_t>(mapping_end, window_end);
+                if (hit_start < hit_end)
+                {
+                    ranges.push_back({.address = hit_start, .size = static_cast<size_t>(hit_end - hit_start)});
+                }
+            }
+
+            return ranges;
+        }
+
+        FEXCore::HostFeatures fetch_host_features_android()
+        {
+            FEXCore::HostFeatures features{};
+            const long logical_cpus = ::sysconf(_SC_NPROCESSORS_ONLN);
+            features.CPUMIDRs.assign(logical_cpus > 0 ? static_cast<size_t>(logical_cpus) : 1, 0u);
+            return features;
+        }
+#endif
 
 #ifdef __APPLE__
         // FEXCore's JITWriteScope (FEXCore/Utils/AllocatorHooks.h) toggles pthread_jit_write_protect_np
@@ -1105,6 +1152,12 @@ namespace sogen::fex
       public:
         fex_x86_64_emulator()
         {
+#ifdef __ANDROID__
+            if (static_cast<size_t>(::getpagesize()) != page_size)
+            {
+                throw std::runtime_error("FEX backend requires 4KB host pages on Android");
+            }
+#endif
             this->initialize_context();
         }
 
@@ -1128,16 +1181,13 @@ namespace sogen::fex
                 this->thread_ = nullptr;
             }
 
-            // Release everything we mmap'd into the (host == guest) address space.
-#ifdef __APPLE__
-            // All mappings this backend must tear down are tracked as 16KB host pages (see
-            // mapped_host_pages_apple_), including PROT_NONE reservation claims and map_host_memory
-            // aliases. Darwin's munmap also requires host-page alignment, which regions_ entries don't guarantee.
-            for (const auto host_page : this->mapped_host_pages_apple_)
+            // Release everything we claimed in the shared host == guest address space. Host-memory
+            // aliases on Android are caller-owned and therefore never enter this map.
+#if defined(__APPLE__) || defined(__ANDROID__)
+            for (const auto& [address, size] : this->claimed_host_ranges_)
             {
-                ::munmap(reinterpret_cast<void*>(host_page), host_page_size_apple);
+                ::munmap(reinterpret_cast<void*>(address), size);
             }
-
 #else
             for (const auto& [address, region] : this->regions_)
             {
@@ -1796,6 +1846,16 @@ namespace sogen::fex
 
             return ranges;
         }
+#elif defined(__ANDROID__)
+        std::vector<host_reserved_range> reserved_host_ranges() const override
+        {
+            return read_host_mappings_android(0, guest_address_space_end);
+        }
+
+        std::vector<host_reserved_range> reserved_host_ranges_in(const uint64_t address, const size_t size) const override
+        {
+            return read_host_mappings_android(address, address + size);
+        }
 #endif
 
       private:
@@ -1826,6 +1886,12 @@ namespace sogen::fex
             // syscalls actually get issued and at what alignment.
             this->set_shadow_range_apple(address, size, permissions);
             this->sync_host_pages_covering_apple(address, size);
+#elif defined(__ANDROID__)
+            if (!this->host_range_is_claimed(address, size))
+            {
+                this->claim_host_range(address, size);
+            }
+            this->remap_host_claim(address, size, to_prot(permissions));
 #else
             // Place the guest pages at their guest address in the host address space (guest VA == host VA).
             void* result = ::mmap(reinterpret_cast<void*>(address), size, to_prot(permissions),
@@ -1841,58 +1907,69 @@ namespace sogen::fex
             this->mark_executable_range(address, size, permissions);
         }
 
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__ANDROID__)
         void reserve_guest_address_range(uint64_t address, size_t size) override
         {
-            // Pages already ours (from this or an adjacent guest region sharing the host page) keep
-            // their mapping; sync_host_page_apple/map_memory applies the real permission on commit.
-            // Everything else is claimed one mmap per contiguous run: whole module image reservations
-            // come through here, and a per-page syscall makes process startup crawl.
+#ifdef __APPLE__
             const uint64_t start = host_page_align_down_apple(address);
             const uint64_t end = host_page_align_up_apple(address + size);
-            for (uint64_t host_page = start; host_page < end;)
+#else
+            const uint64_t start = address;
+            const uint64_t end = address + size;
+#endif
+
+            uint64_t cursor = start;
+            while (cursor < end)
             {
-                if (this->mapped_host_pages_apple_.contains(host_page))
+                auto next = this->claimed_host_ranges_.upper_bound(cursor);
+                if (next != this->claimed_host_ranges_.begin())
                 {
-                    host_page += host_page_size_apple;
-                    continue;
+                    const auto& previous = *std::prev(next);
+                    const uint64_t previous_end = previous.first + previous.second;
+                    if (previous_end > cursor)
+                    {
+                        cursor = std::min(previous_end, end);
+                        continue;
+                    }
                 }
 
-                uint64_t run_end = host_page + host_page_size_apple;
-                while (run_end < end && !this->mapped_host_pages_apple_.contains(run_end))
-                {
-                    run_end += host_page_size_apple;
-                }
-
-                void* result = ::mmap(reinterpret_cast<void*>(host_page), static_cast<size_t>(run_end - host_page), PROT_NONE,
-                                      MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-                if (result == MAP_FAILED || result != reinterpret_cast<void*>(host_page))
-                {
-                    throw std::runtime_error("FEX backend failed to reserve guest address range at the host level");
-                }
-
-                for (uint64_t claimed = host_page; claimed < run_end; claimed += host_page_size_apple)
-                {
-                    this->mapped_host_pages_apple_.insert(claimed);
-                }
-
-                host_page = run_end;
+                const uint64_t run_end = next == this->claimed_host_ranges_.end() ? end : std::min(next->first, end);
+                this->claim_host_range(cursor, static_cast<size_t>(run_end - cursor));
+                cursor = run_end;
             }
         }
 
         void release_guest_address_range(uint64_t address, size_t size) override
         {
-            // The caller guarantees the range holds no reserved guest ranges (see memory_interface), so
-            // every host page wholly inside it is a stale claim and can go back to the OS. Boundary
-            // pages are kept: their outside part may belong to a neighboring, still-live reservation.
+#ifdef __APPLE__
             const uint64_t start = host_page_align_up_apple(address);
             const uint64_t end = host_page_align_down_apple(address + size);
+#else
+            const uint64_t start = address;
+            const uint64_t end = address + size;
+#endif
+            std::vector<host_reserved_range> released;
 
-            auto it = this->mapped_host_pages_apple_.lower_bound(start);
-            while (it != this->mapped_host_pages_apple_.end() && *it + host_page_size_apple <= end)
+            auto it = this->claimed_host_ranges_.upper_bound(start);
+            if (it != this->claimed_host_ranges_.begin())
             {
-                ::munmap(reinterpret_cast<void*>(*it), host_page_size_apple);
-                it = this->mapped_host_pages_apple_.erase(it);
+                --it;
+            }
+
+            for (; it != this->claimed_host_ranges_.end() && it->first < end; ++it)
+            {
+                const uint64_t hit_start = std::max(it->first, start);
+                const uint64_t hit_end = std::min<uint64_t>(it->first + it->second, end);
+                if (hit_start < hit_end)
+                {
+                    released.push_back({.address = hit_start, .size = static_cast<size_t>(hit_end - hit_start)});
+                }
+            }
+
+            for (const auto& range : released)
+            {
+                ::munmap(reinterpret_cast<void*>(range.address), range.size);
+                this->remove_host_claim(range.address, range.size);
             }
         }
 #endif
@@ -1909,6 +1986,13 @@ namespace sogen::fex
 #ifdef __APPLE__
             // VM_FLAGS_OVERWRITE replaces the reservation the memory manager put at the target;
             // copy=FALSE creates a second mapping of the caller-owned pages rather than copying them.
+            const uint64_t claim_start = host_page_align_down_apple(host_address);
+            const size_t claim_size = static_cast<size_t>(host_page_align_up_apple(host_address + size) - claim_start);
+            if (!this->host_range_is_claimed(claim_start, claim_size))
+            {
+                this->claim_host_range(claim_start, claim_size);
+            }
+
             mach_vm_address_t target_address = host_address;
             vm_prot_t cur_protection = VM_PROT_NONE;
             vm_prot_t max_protection = VM_PROT_NONE;
@@ -1918,13 +2002,6 @@ namespace sogen::fex
             if (result != KERN_SUCCESS || target_address != host_address)
             {
                 throw std::runtime_error("FEX backend failed to alias host memory into the guest");
-            }
-
-            const uint64_t host_page_start = host_page_align_down_apple(host_address);
-            const uint64_t host_page_end = host_page_align_up_apple(host_address + size);
-            for (uint64_t host_page = host_page_start; host_page < host_page_end; host_page += host_page_size_apple)
-            {
-                this->mapped_host_pages_apple_.insert(host_page);
             }
 #else
             if (host_address != get_untagged_pointer_address(host_pointer))
@@ -1997,6 +2074,13 @@ namespace sogen::fex
 #ifdef __APPLE__
             this->set_shadow_range_apple(address, size, std::nullopt);
             this->sync_host_pages_covering_apple(address, size);
+#elif defined(__ANDROID__)
+            const auto region = this->find_region_containing(address);
+            const bool unmap = region == this->regions_.end() || region->second.owned;
+            if (unmap)
+            {
+                this->remap_host_claim(address, size, PROT_NONE);
+            }
 #else
             const auto region = this->find_region_containing(address);
             const bool unmap = region == this->regions_.end() || region->second.owned;
@@ -2029,6 +2113,118 @@ namespace sogen::fex
         }
 
         // region bookkeeping
+
+#if defined(__APPLE__) || defined(__ANDROID__)
+        bool host_range_is_claimed(const uint64_t address, const size_t size) const
+        {
+            auto it = this->claimed_host_ranges_.upper_bound(address);
+            if (it == this->claimed_host_ranges_.begin())
+            {
+                return false;
+            }
+
+            --it;
+            return address >= it->first && address + size <= it->first + it->second;
+        }
+
+        void add_host_claim(const uint64_t address, const size_t size)
+        {
+            uint64_t start = address;
+            uint64_t end = address + size;
+            auto it = this->claimed_host_ranges_.lower_bound(start);
+
+            if (it != this->claimed_host_ranges_.begin())
+            {
+                const auto previous = std::prev(it);
+                if (previous->first + previous->second >= start)
+                {
+                    start = previous->first;
+                    end = std::max(end, previous->first + previous->second);
+                    it = this->claimed_host_ranges_.erase(previous);
+                }
+            }
+
+            while (it != this->claimed_host_ranges_.end() && it->first <= end)
+            {
+                end = std::max(end, it->first + it->second);
+                it = this->claimed_host_ranges_.erase(it);
+            }
+
+            this->claimed_host_ranges_.emplace(start, static_cast<size_t>(end - start));
+        }
+
+        void remove_host_claim(const uint64_t address, const size_t size)
+        {
+            auto it = this->claimed_host_ranges_.upper_bound(address);
+            if (it == this->claimed_host_ranges_.begin())
+            {
+                return;
+            }
+
+            --it;
+            const uint64_t claim_start = it->first;
+            const uint64_t claim_end = claim_start + it->second;
+            const uint64_t end = address + size;
+            if (address < claim_start || end > claim_end)
+            {
+                return;
+            }
+
+            this->claimed_host_ranges_.erase(it);
+            if (claim_start < address)
+            {
+                this->claimed_host_ranges_.emplace(claim_start, static_cast<size_t>(address - claim_start));
+            }
+            if (end < claim_end)
+            {
+                this->claimed_host_ranges_.emplace(end, static_cast<size_t>(claim_end - end));
+            }
+        }
+
+        void claim_host_range(const uint64_t address, const size_t size)
+        {
+#ifdef __APPLE__
+            mach_vm_address_t target = address;
+            const kern_return_t result = ::mach_vm_allocate(mach_task_self(), &target, size, VM_FLAGS_FIXED);
+            if (result != KERN_SUCCESS || target != address)
+            {
+                throw std::runtime_error("FEX backend failed to reserve guest address range at the host level");
+            }
+            if (::mprotect(reinterpret_cast<void*>(address), size, PROT_NONE) != 0)
+            {
+                ::mach_vm_deallocate(mach_task_self(), target, size);
+                throw std::runtime_error("FEX backend failed to protect a guest address reservation");
+            }
+#else
+            void* result = ::mmap(reinterpret_cast<void*>(address), size, PROT_NONE,
+                                  MAP_FIXED_NOREPLACE | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+            if (result == MAP_FAILED || reinterpret_cast<uint64_t>(result) != address)
+            {
+                if (result != MAP_FAILED)
+                {
+                    ::munmap(result, size);
+                }
+                throw std::runtime_error("FEX backend failed to reserve guest address range at the host level");
+            }
+#endif
+            this->add_host_claim(address, size);
+        }
+
+        void remap_host_claim(const uint64_t address, const size_t size, const int protection)
+        {
+            if (!this->host_range_is_claimed(address, size))
+            {
+                throw std::logic_error("FEX backend cannot replace an unclaimed host range");
+            }
+
+            void* result =
+                ::mmap(reinterpret_cast<void*>(address), size, protection, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+            if (result == MAP_FAILED || reinterpret_cast<uint64_t>(result) != address)
+            {
+                throw std::runtime_error("FEX backend failed to replace a claimed host range");
+            }
+        }
+#endif
 
         // Returns the region that contains address, not merely its predecessor in the ordered map.
         std::map<uint64_t, mapped_region>::const_iterator find_region_containing(uint64_t address) const
@@ -2287,7 +2483,7 @@ namespace sogen::fex
             }
 
             void* host_ptr = reinterpret_cast<void*>(host_page_addr);
-            const bool currently_mapped = this->mapped_host_pages_apple_.contains(host_page_addr);
+            const bool currently_mapped = this->host_range_is_claimed(host_page_addr, host_page_size_apple);
 
             if (!any_slot_present)
             {
@@ -2298,26 +2494,14 @@ namespace sogen::fex
                     // and be clobbered by a later recommit's MAP_FIXED. Replacing the mapping rather
                     // than mprotect'ing it discards the old contents, so a recommit sees the zeroed
                     // pages MEM_COMMIT requires. release_guest_address_range drops the claim for good.
-                    void* result =
-                        ::mmap(host_ptr, host_page_size_apple, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-                    if (result != host_ptr)
-                    {
-                        throw std::runtime_error("FEX backend failed to re-reserve decommitted guest memory");
-                    }
+                    this->remap_host_claim(host_page_addr, host_page_size_apple, PROT_NONE);
                 }
                 return;
             }
 
             if (!currently_mapped)
             {
-                void* result = ::mmap(host_ptr, host_page_size_apple, to_prot_apple(effective),
-                                      MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-                if (result == MAP_FAILED || result != host_ptr)
-                {
-                    throw std::runtime_error("FEX backend failed to map guest memory at requested address");
-                }
-                this->mapped_host_pages_apple_.insert(host_page_addr);
-                return;
+                this->claim_host_range(host_page_addr, host_page_size_apple);
             }
 
             if (::mprotect(host_ptr, host_page_size_apple, to_prot_apple(effective)) != 0)
@@ -2415,6 +2599,8 @@ namespace sogen::fex
 
 #ifdef __APPLE__
             const FEXCore::HostFeatures features = fetch_host_features_apple();
+#elif defined(__ANDROID__)
+            const FEXCore::HostFeatures features = fetch_host_features_android();
 #else
             const FEXCore::HostFeatures features{}; // TODO(fex): FEXCore::FetchHostFeatures() on real HW.
 #endif
@@ -3345,15 +3531,16 @@ namespace sogen::fex
         // guest address space) and outlive any individual CPUState snapshot they were allocated for.
         std::unordered_map<uint64_t, callret_buffer_record> callret_buffers_;
 
+#if defined(__APPLE__) || defined(__ANDROID__)
+        std::map<uint64_t, size_t> claimed_host_ranges_;
+#endif
+
 #ifdef __APPLE__
         // Apple Silicon's 16KB host page is coarser than the guest's 4KB architectural page, so one host
         // mprotect cannot always express what the guest requested per 4KB page - a PE image's .text (RX)
         // directly followed by .data (RW) share a host page. page_shadow_apple_ is the per-4KB source of
-        // truth (absent = never requested, which must still fault); mapped_host_pages_apple_ tracks
-        // which host pages have a live mmap, so sync_host_page_apple can tell a first-time mmap from a
-        // protection change.
+        // truth (absent = never requested, which must still fault).
         std::map<uint64_t, memory_permission> page_shadow_apple_;
-        std::set<uint64_t> mapped_host_pages_apple_;
 #endif
 
         hook_entry* syscall_hook_ = nullptr;
