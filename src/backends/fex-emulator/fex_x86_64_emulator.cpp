@@ -17,8 +17,9 @@
 // hooks are accepted for API compatibility but never fire. Guest `syscall` instructions come back
 // through a FEXCore::HLE::SyscallHandler that invokes the registered syscall instruction hook.
 //
-// Darwin and Android install platform signal handlers for FEX's control-flow faults and direct MMIO.
-// The 16KB/4KB page reconciliation and MAP_JIT handling remain Darwin-only.
+// The functional targets are Darwin on Apple Silicon and Android on AArch64; the signal handlers and
+// MMIO fault emulation below support both. The 16KB/4KB page reconciliation and MAP_JIT handling are
+// Darwin-only. Other AArch64 Linux hosts have build coverage only.
 
 #include <cstdlib>
 #include <pthread.h>
@@ -313,10 +314,8 @@ namespace sogen::fex
         // handling. Kept for the misaligned-atomic/false-fault emulation paths; mmio_region's only
         // consumer here is read-only.
         //
-        // Deliberately narrow: broadening this emulation decoder to plain STR/STUR causes a reproducible
-        // hang isolated to this table (root cause not yet understood; decode_arm64_load's equivalent
-        // plain-load coverage is safe). Real Android protection-fault read/write classification uses the
-        // kernel's ESR WnR bit instead and therefore does not require broadening this decoder.
+        // Deliberately narrow: adding plain STR/STUR causes a reproducible hang in false-fault emulation.
+        // Android classifies protection faults from ESR; Darwin therefore reports plain STR faults as reads.
         struct decoded_arm64_store
         {
             uint32_t size = 0; // bytes: 1, 2, 4, 8
@@ -612,7 +611,213 @@ namespace sogen::fex
 
             return features;
         }
+#endif
 
+#if defined(__APPLE__) || defined(__ANDROID__)
+        // POSIX signal handlers cannot be non-static member functions, so the free handler below uses
+        // TLS to reach the emulator executing on this thread. Unrelated-thread signals see null and
+        // chain to the application's saved disposition instead of being mistaken for FEX faults.
+        thread_local fex_x86_64_emulator* g_active_emulator = nullptr;
+        // sigaction dispositions are process-wide even though the active emulator is thread-local.
+        bool fault_signal_handlers_installed = false;
+
+        void fault_signal_handler(int sig, siginfo_t* info, void* raw_ucontext);
+
+        // FEXCore's Break stubs use SIGILL for HLT/UDF and SIGTRAP for BRK, including x86 INT3, so both
+        // must reach the same host-fault dispatcher as SIGSEGV/SIGBUS.
+        constexpr std::array<int, 4> fault_signals = {SIGSEGV, SIGBUS, SIGILL, SIGTRAP};
+        std::array<struct sigaction, fault_signals.size()> previous_fault_signal_actions{};
+        std::mutex fault_signal_install_mutex{};
+        thread_local stack_t previous_fault_alt_stack{};
+        thread_local bool fault_alt_stack_installed = false;
+        thread_local std::array<std::byte, 64 * 1024> fault_alt_stack{};
+
+        void uninstall_fault_signal_handlers() noexcept
+        {
+            std::lock_guard lock{fault_signal_install_mutex};
+            if (!fault_signal_handlers_installed)
+            {
+                return;
+            }
+
+            // Do not overwrite an embedding application that deliberately replaced one of our handlers
+            // while the backend was alive; only restore entries that are still ours.
+            for (size_t i = 0; i < fault_signals.size(); ++i)
+            {
+                struct sigaction current{};
+                if (::sigaction(fault_signals[i], nullptr, &current) == 0 && (current.sa_flags & SA_SIGINFO) != 0 &&
+                    current.sa_sigaction == fault_signal_handler)
+                {
+                    ::sigaction(fault_signals[i], &previous_fault_signal_actions[i], nullptr);
+                }
+            }
+            fault_signal_handlers_installed = false;
+        }
+
+        void dispatch_previous_fault_signal_action(int sig, siginfo_t* info, void* raw_ucontext)
+        {
+            size_t signal_index = 0;
+            while (signal_index < fault_signals.size() && fault_signals[signal_index] != sig)
+            {
+                ++signal_index;
+            }
+            if (signal_index == fault_signals.size())
+            {
+                return;
+            }
+
+            auto& saved_action = previous_fault_signal_actions[signal_index];
+            const struct sigaction action = saved_action;
+            if (action.sa_handler == SIG_IGN)
+            {
+                return;
+            }
+            if (action.sa_handler == SIG_DFL)
+            {
+                ::sigaction(sig, &action, nullptr);
+                ::raise(sig);
+                return;
+            }
+
+            // SA_RESETHAND takes effect before invoking the application handler. Keep the saved action
+            // in sync while leaving FEX's own kernel disposition installed for subsequent translated
+            // faults if the application handler returns.
+            if ((action.sa_flags & SA_RESETHAND) != 0)
+            {
+                struct sigaction default_action{};
+                default_action.sa_handler = SIG_DFL;
+                sigemptyset(&default_action.sa_mask);
+                saved_action = default_action;
+            }
+
+            sigset_t old_mask{};
+            const bool have_old_mask = ::pthread_sigmask(SIG_SETMASK, nullptr, &old_mask) == 0;
+            ::pthread_sigmask(SIG_BLOCK, &action.sa_mask, nullptr);
+            if ((action.sa_flags & SA_NODEFER) != 0 && sigismember(&action.sa_mask, sig) == 0)
+            {
+                sigset_t signal_mask{};
+                sigemptyset(&signal_mask);
+                sigaddset(&signal_mask, sig);
+                ::pthread_sigmask(SIG_UNBLOCK, &signal_mask, nullptr);
+            }
+
+            if ((action.sa_flags & SA_SIGINFO) != 0)
+            {
+                action.sa_sigaction(sig, info, raw_ucontext);
+            }
+            else
+            {
+                action.sa_handler(sig);
+            }
+
+            if (have_old_mask)
+            {
+                ::pthread_sigmask(SIG_SETMASK, &old_mask, nullptr);
+            }
+        }
+
+        void install_fault_signal_handlers()
+        {
+            std::lock_guard lock{fault_signal_install_mutex};
+            if (fault_signal_handlers_installed)
+            {
+                throw std::runtime_error("Only one FEX emulator instance can be active per process");
+            }
+
+            for (size_t i = 0; i < fault_signals.size(); ++i)
+            {
+                if (::sigaction(fault_signals[i], nullptr, &previous_fault_signal_actions[i]) != 0)
+                {
+                    throw std::runtime_error("FEX backend failed to query a fault signal action");
+                }
+            }
+
+            struct sigaction action{};
+            action.sa_sigaction = fault_signal_handler;
+            sigemptyset(&action.sa_mask);
+
+            size_t installed_signal_count = 0;
+            for (; installed_signal_count < fault_signals.size(); ++installed_signal_count)
+            {
+                // SA_RESTART affects the interrupted host operation after our handler returns, so carry
+                // it through from the embedding application's disposition. The other handler-control
+                // flags are reproduced explicitly when an unhandled signal is chained below.
+                action.sa_flags = SA_SIGINFO | SA_ONSTACK | (previous_fault_signal_actions[installed_signal_count].sa_flags & SA_RESTART);
+                if (::sigaction(fault_signals[installed_signal_count], &action, nullptr) != 0)
+                {
+                    bool restored = true;
+                    for (size_t i = installed_signal_count; i > 0; --i)
+                    {
+                        restored &= ::sigaction(fault_signals[i - 1], &previous_fault_signal_actions[i - 1], nullptr) == 0;
+                    }
+                    if (!restored)
+                    {
+                        // Do not report a recoverable constructor failure while leaving partial
+                        // process-global signal state installed.
+                        std::terminate();
+                    }
+                    throw std::runtime_error("FEX backend failed to install a fault signal action");
+                }
+            }
+
+            fault_signal_handlers_installed = true;
+        }
+
+        void activate_fault_signal_handling(fex_x86_64_emulator& emulator)
+        {
+            if (g_active_emulator != nullptr)
+            {
+                throw std::runtime_error("A FEX emulator is already active on this thread");
+            }
+
+            // sigaltstack state is per-thread. Preserve an application-provided stack; otherwise use
+            // ours so a nested fault does not depend on the executing thread's possibly exhausted stack.
+            stack_t current_stack{};
+            if (::sigaltstack(nullptr, &current_stack) != 0)
+            {
+                throw std::runtime_error("FEX backend failed to query the alternate signal stack");
+            }
+
+            if ((current_stack.ss_flags & SS_DISABLE) != 0)
+            {
+                stack_t stack{};
+                stack.ss_sp = fault_alt_stack.data();
+                stack.ss_size = fault_alt_stack.size();
+                if (::sigaltstack(&stack, nullptr) != 0)
+                {
+                    throw std::runtime_error("FEX backend failed to install the alternate signal stack");
+                }
+                previous_fault_alt_stack = current_stack;
+                fault_alt_stack_installed = true;
+            }
+
+            g_active_emulator = &emulator;
+        }
+
+        void deactivate_fault_signal_handling(fex_x86_64_emulator& emulator) noexcept
+        {
+            if (g_active_emulator != &emulator)
+            {
+                return;
+            }
+
+            g_active_emulator = nullptr;
+            if (!fault_alt_stack_installed)
+            {
+                return;
+            }
+
+            stack_t current_stack{};
+            if (::sigaltstack(nullptr, &current_stack) == 0 && (current_stack.ss_flags & (SS_DISABLE | SS_ONSTACK)) == 0 &&
+                current_stack.ss_sp == fault_alt_stack.data() && current_stack.ss_size == fault_alt_stack.size())
+            {
+                ::sigaltstack(&previous_fault_alt_stack, nullptr);
+            }
+            fault_alt_stack_installed = false;
+        }
+#endif
+
+#ifdef __APPLE__
         // Arm64JITCore::ExitFunctionLink (JIT.cpp) patches an already-compiled call site once its target
         // block is known, writing straight into a MAP_JIT code buffer without a JITWriteScope, because
         // it is written for Linux, which has no per-thread W^X state. Pointers.ExitFunctionLink is a
@@ -862,201 +1067,6 @@ namespace sogen::fex
         }
 #endif
 
-#if defined(__APPLE__) || defined(__ANDROID__)
-        thread_local fex_x86_64_emulator* g_active_emulator = nullptr;
-        bool fault_signal_handlers_installed = false;
-
-        void fault_signal_handler(int sig, siginfo_t* info, void* raw_ucontext);
-
-        constexpr std::array<int, 4> fault_signals = {SIGSEGV, SIGBUS, SIGILL, SIGTRAP};
-        std::array<struct sigaction, fault_signals.size()> previous_fault_signal_actions{};
-        std::mutex fault_signal_install_mutex{};
-        thread_local stack_t previous_fault_alt_stack{};
-        thread_local bool fault_alt_stack_installed = false;
-        thread_local std::array<std::byte, 64 * 1024> fault_alt_stack{};
-
-        void uninstall_fault_signal_handlers() noexcept
-        {
-            std::lock_guard lock{fault_signal_install_mutex};
-            if (!fault_signal_handlers_installed)
-            {
-                return;
-            }
-
-            // Do not overwrite an embedding application that deliberately replaced one of our handlers
-            // while the backend was alive; only restore entries that are still ours.
-            for (size_t i = 0; i < fault_signals.size(); ++i)
-            {
-                struct sigaction current{};
-                if (::sigaction(fault_signals[i], nullptr, &current) == 0 && (current.sa_flags & SA_SIGINFO) != 0 &&
-                    current.sa_sigaction == fault_signal_handler)
-                {
-                    ::sigaction(fault_signals[i], &previous_fault_signal_actions[i], nullptr);
-                }
-            }
-            fault_signal_handlers_installed = false;
-        }
-
-        void dispatch_previous_fault_signal_action(int sig, siginfo_t* info, void* raw_ucontext)
-        {
-            size_t signal_index = 0;
-            while (signal_index < fault_signals.size() && fault_signals[signal_index] != sig)
-            {
-                ++signal_index;
-            }
-            if (signal_index == fault_signals.size())
-            {
-                return;
-            }
-
-            auto& saved_action = previous_fault_signal_actions[signal_index];
-            const struct sigaction action = saved_action;
-            if (action.sa_handler == SIG_IGN)
-            {
-                return;
-            }
-            if (action.sa_handler == SIG_DFL)
-            {
-                ::sigaction(sig, &action, nullptr);
-                ::raise(sig);
-                return;
-            }
-
-            // SA_RESETHAND takes effect before invoking the application handler. Keep the saved action
-            // in sync while leaving FEX's own kernel disposition installed for subsequent translated
-            // faults if the application handler returns.
-            if ((action.sa_flags & SA_RESETHAND) != 0)
-            {
-                struct sigaction default_action{};
-                default_action.sa_handler = SIG_DFL;
-                sigemptyset(&default_action.sa_mask);
-                saved_action = default_action;
-            }
-
-            sigset_t old_mask{};
-            const bool have_old_mask = ::pthread_sigmask(SIG_SETMASK, nullptr, &old_mask) == 0;
-            ::pthread_sigmask(SIG_BLOCK, &action.sa_mask, nullptr);
-            if ((action.sa_flags & SA_NODEFER) != 0 && sigismember(&action.sa_mask, sig) == 0)
-            {
-                sigset_t signal_mask{};
-                sigemptyset(&signal_mask);
-                sigaddset(&signal_mask, sig);
-                ::pthread_sigmask(SIG_UNBLOCK, &signal_mask, nullptr);
-            }
-
-            if ((action.sa_flags & SA_SIGINFO) != 0)
-            {
-                action.sa_sigaction(sig, info, raw_ucontext);
-            }
-            else
-            {
-                action.sa_handler(sig);
-            }
-
-            if (have_old_mask)
-            {
-                ::pthread_sigmask(SIG_SETMASK, &old_mask, nullptr);
-            }
-        }
-
-        void install_fault_signal_handlers()
-        {
-            std::lock_guard lock{fault_signal_install_mutex};
-            if (fault_signal_handlers_installed)
-            {
-                throw std::runtime_error("Only one FEX emulator instance can be active per process");
-            }
-
-            for (size_t i = 0; i < fault_signals.size(); ++i)
-            {
-                if (::sigaction(fault_signals[i], nullptr, &previous_fault_signal_actions[i]) != 0)
-                {
-                    throw std::runtime_error("FEX backend failed to query a fault signal action");
-                }
-            }
-
-            struct sigaction action{};
-            action.sa_sigaction = fault_signal_handler;
-            sigemptyset(&action.sa_mask);
-
-            size_t installed_signal_count = 0;
-            for (; installed_signal_count < fault_signals.size(); ++installed_signal_count)
-            {
-                // SA_RESTART affects the interrupted host operation after our handler returns, so carry
-                // it through from the embedding application's disposition. The other handler-control
-                // flags are reproduced explicitly when an unhandled signal is chained below.
-                action.sa_flags = SA_SIGINFO | SA_ONSTACK | (previous_fault_signal_actions[installed_signal_count].sa_flags & SA_RESTART);
-                if (::sigaction(fault_signals[installed_signal_count], &action, nullptr) != 0)
-                {
-                    bool restored = true;
-                    for (size_t i = installed_signal_count; i > 0; --i)
-                    {
-                        restored &= ::sigaction(fault_signals[i - 1], &previous_fault_signal_actions[i - 1], nullptr) == 0;
-                    }
-                    if (!restored)
-                    {
-                        // Do not report a recoverable constructor failure while leaving partial
-                        // process-global signal state installed.
-                        std::terminate();
-                    }
-                    throw std::runtime_error("FEX backend failed to install a fault signal action");
-                }
-            }
-
-            fault_signal_handlers_installed = true;
-        }
-
-        void activate_fault_signal_handling(fex_x86_64_emulator& emulator)
-        {
-            if (g_active_emulator != nullptr)
-            {
-                throw std::runtime_error("A FEX emulator is already active on this thread");
-            }
-
-            stack_t current_stack{};
-            if (::sigaltstack(nullptr, &current_stack) != 0)
-            {
-                throw std::runtime_error("FEX backend failed to query the alternate signal stack");
-            }
-
-            if ((current_stack.ss_flags & SS_DISABLE) != 0)
-            {
-                stack_t stack{};
-                stack.ss_sp = fault_alt_stack.data();
-                stack.ss_size = fault_alt_stack.size();
-                if (::sigaltstack(&stack, nullptr) != 0)
-                {
-                    throw std::runtime_error("FEX backend failed to install the alternate signal stack");
-                }
-                previous_fault_alt_stack = current_stack;
-                fault_alt_stack_installed = true;
-            }
-
-            g_active_emulator = &emulator;
-        }
-
-        void deactivate_fault_signal_handling(fex_x86_64_emulator& emulator) noexcept
-        {
-            if (g_active_emulator != &emulator)
-            {
-                return;
-            }
-
-            g_active_emulator = nullptr;
-            if (!fault_alt_stack_installed)
-            {
-                return;
-            }
-
-            stack_t current_stack{};
-            if (::sigaltstack(nullptr, &current_stack) == 0 && (current_stack.ss_flags & (SS_DISABLE | SS_ONSTACK)) == 0 &&
-                current_stack.ss_sp == fault_alt_stack.data() && current_stack.ss_size == fault_alt_stack.size())
-            {
-                ::sigaltstack(&previous_fault_alt_stack, nullptr);
-            }
-            fault_alt_stack_installed = false;
-        }
-#endif
     }
 
     class fex_x86_64_emulator;
