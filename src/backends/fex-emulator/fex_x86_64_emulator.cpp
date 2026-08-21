@@ -27,9 +27,9 @@
 #include <sys/ucontext.h>
 #include <unistd.h>
 
-// Used unconditionally by the std::terminate handler in initialize_context(). Both platforms
-// SOGEN_ENABLE_FEX gates this backend to provide it, so the include need not be Apple-only.
+#if !defined(__ANDROID__) || __ANDROID_API__ >= 33
 #include <execinfo.h>
+#endif
 
 #ifdef __APPLE__
 #include <sys/sysctl.h>
@@ -2365,6 +2365,7 @@ namespace sogen::fex
                     }
                 }
 
+#if !defined(__ANDROID__) || __ANDROID_API__ >= 33
                 void* frames[64]{};
                 const int frame_count = ::backtrace(frames, 64);
                 char** symbols = ::backtrace_symbols(frames, frame_count);
@@ -2374,6 +2375,7 @@ namespace sogen::fex
                     fprintf(stderr, "  %s\n", symbols ? symbols[i] : "?");
                 }
                 free(symbols);
+#endif
 
                 std::abort();
             });

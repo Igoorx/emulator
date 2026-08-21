@@ -17,6 +17,12 @@ if(SOGEN_ENABLE_FEX)
     set(_FEXCORE_OSX_ARGS "")
   endif()
 
+  if(CMAKE_TOOLCHAIN_FILE)
+    set(_FEXCORE_TOOLCHAIN_ARGS -DCMAKE_TOOLCHAIN_FILE:FILEPATH=${CMAKE_TOOLCHAIN_FILE})
+  else()
+    set(_FEXCORE_TOOLCHAIN_ARGS "")
+  endif()
+
   # Propagate AddressSanitizer into the FEXCore build so the whole chain is instrumented
   # consistently (mismatched ASan instrumentation across shared libraries causes false positives).
   if(SOGEN_ENABLE_SANITIZER)
@@ -52,6 +58,7 @@ if(SOGEN_ENABLE_FEX)
       -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
       -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
       ${_FEXCORE_OSX_ARGS}
+      ${_FEXCORE_TOOLCHAIN_ARGS}
       ${_FEXCORE_SANITIZER_ARGS}
       ${_FEXCORE_LTO_ARGS}
       -DENABLE_CCACHE=OFF
