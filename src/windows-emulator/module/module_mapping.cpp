@@ -7,6 +7,8 @@
 #include <utils/buffer_accessor.hpp>
 #include <utils/string.hpp>
 #include <platform/win_pefile.hpp>
+#include <iomanip>
+#include <sstream>
 
 #if defined(__clang__) || defined(__GNUC__)
 #pragma GCC diagnostic ignored "-Winvalid-offsetof"
@@ -17,6 +19,20 @@ namespace sogen
 
     namespace
     {
+        constexpr uint32_t k_image_debug_type_codeview = 2;
+
+        struct image_debug_directory
+        {
+            uint32_t characteristics{};
+            uint32_t time_date_stamp{};
+            uint16_t major_version{};
+            uint16_t minor_version{};
+            uint32_t type{};
+            uint32_t size_of_data{};
+            uint32_t address_of_raw_data{};
+            uint32_t pointer_to_raw_data{};
+        };
+
         bool must_map_module_below_4gb(const std::string& module_name, const PEMachineType machine, const uint64_t image_base)
         {
             if (machine != PEMachineType::AMD64)
@@ -31,6 +47,159 @@ namespace sogen
             }
 
             return image_base > std::numeric_limits<uint32_t>::max();
+        }
+
+        std::string format_guid(const std::span<const std::byte, 16> guid)
+        {
+            uint32_t data1{};
+            uint16_t data2{};
+            uint16_t data3{};
+            memcpy(&data1, guid.data(), sizeof(data1));
+            memcpy(&data2, guid.data() + 4, sizeof(data2));
+            memcpy(&data3, guid.data() + 6, sizeof(data3));
+
+            std::ostringstream stream{};
+            stream << std::uppercase << std::hex << std::setfill('0') << std::setw(8) << data1 << std::setw(4) << data2 << std::setw(4)
+                   << data3;
+
+            for (size_t i = 8; i < guid.size(); ++i)
+            {
+                stream << std::setw(2) << std::to_integer<unsigned>(guid[i]);
+            }
+
+            return stream.str();
+        }
+
+        std::optional<pdb_signature> parse_codeview_record(const utils::safe_buffer_accessor<const std::byte>& buffer, const size_t offset,
+                                                           const size_t size)
+        {
+            if (size < 24)
+            {
+                return std::nullopt;
+            }
+
+            const auto* data = buffer.get_pointer_for_range(offset, size);
+            if (memcmp(data, "RSDS", 4) != 0)
+            {
+                return std::nullopt;
+            }
+
+            std::span<const std::byte, 16> guid{data + 4, 16};
+            uint32_t age{};
+            memcpy(&age, data + 20, sizeof(age));
+
+            std::string path{};
+            for (size_t i = 24; i < size && data[i] != std::byte{}; ++i)
+            {
+                path.push_back(static_cast<char>(data[i]));
+            }
+
+            pdb_signature sig{};
+            sig.guid = format_guid(guid);
+            sig.age = age;
+            sig.path = std::move(path);
+            return sig;
+        }
+
+        template <typename T>
+        std::optional<size_t> rva_to_file_offset(const utils::safe_buffer_accessor<const std::byte>& buffer,
+                                                 const PENTHeaders_t<T>& nt_headers, const uint64_t nt_headers_offset, const uint32_t rva)
+        {
+            if (rva < nt_headers.OptionalHeader.SizeOfHeaders)
+            {
+                return rva;
+            }
+
+            const auto section_offset = winpe::get_first_section_offset(nt_headers, nt_headers_offset);
+            const auto sections = buffer.as<IMAGE_SECTION_HEADER>(static_cast<size_t>(section_offset));
+
+            for (size_t i = 0; i < nt_headers.FileHeader.NumberOfSections; ++i)
+            {
+                const auto section = sections.get(i);
+                const auto section_size = std::max(section.Misc.VirtualSize, section.SizeOfRawData);
+                if (rva < section.VirtualAddress || rva >= section.VirtualAddress + section_size)
+                {
+                    continue;
+                }
+
+                return section.PointerToRawData + (rva - section.VirtualAddress);
+            }
+
+            return std::nullopt;
+        }
+
+        template <typename T>
+        void collect_pe_sections(mapped_module& binary, const utils::safe_buffer_accessor<const std::byte>& buffer,
+                                 const PENTHeaders_t<T>& nt_headers, const uint64_t nt_headers_offset)
+        {
+            binary.pe_sections.clear();
+
+            const auto section_offset = winpe::get_first_section_offset(nt_headers, nt_headers_offset);
+            const auto sections = buffer.as<IMAGE_SECTION_HEADER>(static_cast<size_t>(section_offset));
+            binary.pe_sections.reserve(nt_headers.FileHeader.NumberOfSections);
+
+            for (size_t i = 0; i < nt_headers.FileHeader.NumberOfSections; ++i)
+            {
+                const auto section = sections.get(i);
+                binary.pe_sections.emplace_back(pe_section_symbol_mapping{
+                    .virtual_address = section.VirtualAddress,
+                    .virtual_size = section.Misc.VirtualSize,
+                    .raw_size = section.SizeOfRawData,
+                });
+            }
+        }
+
+        template <typename T>
+        void collect_pdb_signature(mapped_module& binary, const utils::safe_buffer_accessor<const std::byte>& buffer,
+                                   const PENTHeaders_t<T>& nt_headers, const uint64_t nt_headers_offset, const bool mapped_image)
+        {
+            binary.pdb.reset();
+
+            const auto& debug_directory_entry = nt_headers.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG];
+            if (debug_directory_entry.VirtualAddress == 0 || debug_directory_entry.Size < sizeof(image_debug_directory))
+            {
+                return;
+            }
+
+            try
+            {
+                const auto debug_directory_offset =
+                    mapped_image ? std::optional<size_t>{debug_directory_entry.VirtualAddress}
+                                 : rva_to_file_offset(buffer, nt_headers, nt_headers_offset, debug_directory_entry.VirtualAddress);
+                if (!debug_directory_offset)
+                {
+                    return;
+                }
+
+                const auto count = debug_directory_entry.Size / sizeof(image_debug_directory);
+                const auto debug_directories = buffer.as<image_debug_directory>(*debug_directory_offset);
+
+                for (size_t i = 0; i < count; ++i)
+                {
+                    const auto debug = debug_directories.get(i);
+                    if (debug.type != k_image_debug_type_codeview || debug.size_of_data == 0)
+                    {
+                        continue;
+                    }
+
+                    const auto codeview_offset =
+                        mapped_image ? std::optional<size_t>{debug.address_of_raw_data} : std::optional<size_t>{debug.pointer_to_raw_data};
+                    if (!codeview_offset)
+                    {
+                        continue;
+                    }
+
+                    binary.pdb = parse_codeview_record(buffer, *codeview_offset, debug.size_of_data);
+                    if (binary.pdb)
+                    {
+                        return;
+                    }
+                }
+            }
+            catch (...)
+            {
+                binary.pdb.reset();
+            }
         }
 
         template <typename T>
@@ -446,6 +615,8 @@ namespace sogen
             binary.imports.clear();
             binary.imported_modules.clear();
             binary.address_names.clear();
+            binary.pdb.reset();
+            binary.pe_sections.clear();
 
             const auto image_size = static_cast<size_t>(binary.size_of_image);
             if (!memory.allocate_memory(binary.image_base, image_size, memory_permission::all, true, memory_region_kind::section_image))
@@ -496,6 +667,8 @@ namespace sogen
                 binary.imports.clear();
                 binary.imported_modules.clear();
                 binary.address_names.clear();
+                binary.pdb.reset();
+                binary.pe_sections.clear();
                 throw;
             }
 
@@ -544,6 +717,8 @@ namespace sogen
         binary.size_of_stack_commit = optional_header.SizeOfStackCommit;
         binary.size_of_heap_reserve = optional_header.SizeOfHeapReserve;
         binary.size_of_heap_commit = optional_header.SizeOfHeapCommit;
+        collect_pe_sections(binary, buffer, nt_headers, nt_headers_offset);
+        collect_pdb_signature(binary, buffer, nt_headers, nt_headers_offset, false);
 
         const bool is_32bit = (nt_headers.FileHeader.Machine == PEMachineType::I386);
         const auto is_dll = nt_headers.FileHeader.Characteristics & IMAGE_FILE_DLL;
@@ -601,6 +776,9 @@ namespace sogen
             }
         }
 
+        collect_pe_sections(binary, buffer, nt_headers, nt_headers_offset);
+        collect_pdb_signature(binary, buffer, nt_headers, nt_headers_offset, false);
+
         binary.entry_point = binary.image_base + optional_header.AddressOfEntryPoint;
 
         return binary;
@@ -649,6 +827,8 @@ namespace sogen
             binary.size_of_stack_commit = optional_header.SizeOfStackCommit;
             binary.size_of_heap_reserve = optional_header.SizeOfHeapReserve;
             binary.size_of_heap_commit = optional_header.SizeOfHeapCommit;
+            collect_pe_sections(binary, buffer, nt_headers, nt_headers_offset);
+            collect_pdb_signature(binary, buffer, nt_headers, nt_headers_offset, true);
 
             const auto section_offset = winpe::get_first_section_offset(nt_headers, nt_headers_offset);
             const auto sections = buffer.as<IMAGE_SECTION_HEADER>(static_cast<size_t>(section_offset));
