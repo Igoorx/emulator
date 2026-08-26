@@ -20,6 +20,7 @@
 
 #include <utils/finally.hpp>
 #include <utils/interupt_handler.hpp>
+#include <utils/string.hpp>
 
 #if defined(OS_EMSCRIPTEN) && !defined(SOGEN_EMSCRIPTEN_SUPPORT_NODEJS)
 #include <event_handler.hpp>
@@ -617,6 +618,7 @@ namespace sogen
 
             const auto concise_logging = options.concise_logging;
             const auto win_emu = setup_emulator(options, args);
+            win_emu->log.set_silent(options.silent);
             apply_registry_files(*win_emu, options);
             context.win_emu = win_emu.get();
             context.has_report_output = !options.report_path.empty();
@@ -941,12 +943,12 @@ namespace sogen
 
             std::vector<std::string> map_inputs{};
             app.add_option("--map", map_inputs, "Load MSVC MAP symbols from [MODULE=]PATH (defaults to the main executable)")
-                ->expected(1)
+                ->expected(1, -1)
                 ->allow_extra_args(false);
 
             std::vector<std::string> symbol_servers{};
             app.add_option("--symbol-server", symbol_servers, "Add a symbol server searched before Microsoft's public server")
-                ->expected(1)
+                ->expected(1, -1)
                 ->allow_extra_args(false);
 
             std::string symbol_cache{};
@@ -1027,16 +1029,18 @@ namespace sogen
                     apply_symbol_use(pdb_use_value);
                 }
 
+                std::set<std::string> mapped_modules{};
                 for (auto& map_input : map_inputs)
                 {
                     const auto separator = map_input.find('=');
+                    map_symbol_input input{};
                     if (separator == std::string::npos)
                     {
                         if (map_input.empty())
                         {
                             throw std::runtime_error("--map requires a path");
                         }
-                        options.symbols.maps.emplace_back(map_symbol_input{.path = std::move(map_input)});
+                        input.path = std::move(map_input);
                     }
                     else
                     {
@@ -1044,11 +1048,18 @@ namespace sogen
                         {
                             throw std::runtime_error("--map module association must use MODULE=PATH");
                         }
-                        options.symbols.maps.emplace_back(map_symbol_input{
+                        input = map_symbol_input{
                             .module = map_input.substr(0, separator),
                             .path = map_input.substr(separator + 1),
-                        });
+                        };
                     }
+
+                    const auto module_key = input.module ? utils::string::to_lower(*input.module) : std::string{};
+                    if (!mapped_modules.insert(module_key).second)
+                    {
+                        throw std::runtime_error("--map accepts only one mapping per module");
+                    }
+                    options.symbols.maps.emplace_back(std::move(input));
                 }
 
                 for (auto& symbol_server : symbol_servers)
