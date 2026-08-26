@@ -53,6 +53,11 @@ namespace sogen
 
         struct analysis_options : analysis_settings
         {
+            analysis_options()
+                : analysis_settings{}
+            {
+            }
+
             mutable bool use_gdb{false};
             std::string gdb_host{"127.0.0.1"};
             uint16_t gdb_port{28960};
@@ -1040,7 +1045,7 @@ namespace sogen
                         {
                             throw std::runtime_error("--map requires a path");
                         }
-                        input.path = std::move(map_input);
+                        input.path = map_input;
                     }
                     else
                     {
