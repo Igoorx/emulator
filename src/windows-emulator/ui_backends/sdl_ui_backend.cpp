@@ -2,6 +2,9 @@
 #include <platform/ui_backend.hpp>
 
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_vulkan.h>
+
+#include <future>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -940,6 +943,64 @@ namespace sogen
                 }
             }
 
+            std::vector<std::string> vulkan_instance_extensions() override
+            {
+                return this->run_sync([this] {
+                    std::vector<std::string> extensions;
+                    if (!this->ensure_initialized())
+                    {
+                        return extensions;
+                    }
+
+                    Uint32 count{};
+                    const auto* names = SDL_Vulkan_GetInstanceExtensions(&count);
+                    if (!names)
+                    {
+                        return extensions;
+                    }
+
+                    extensions.reserve(count);
+                    for (Uint32 i = 0; i < count; ++i)
+                    {
+                        extensions.emplace_back(names[i]);
+                    }
+                    return extensions;
+                });
+            }
+
+            uint64_t create_vulkan_surface(const hwnd window, const uint64_t instance) override
+            {
+                return this->run_sync([this, window, instance] {
+                    auto* state = this->resolve_window(window);
+                    if (state && !state->window)
+                    {
+                        state = this->resolve_window(this->get_top_level_ancestor(window));
+                    }
+                    if (!state || !state->window)
+                    {
+                        return uint64_t{};
+                    }
+
+                    if (state->texture)
+                    {
+                        SDL_DestroyTexture(state->texture);
+                        state->texture = nullptr;
+                    }
+                    if (state->renderer)
+                    {
+                        SDL_DestroyRenderer(state->renderer);
+                        state->renderer = nullptr;
+                    }
+
+                    VkSurfaceKHR surface{};
+                    if (!SDL_Vulkan_CreateSurface(state->window, reinterpret_cast<VkInstance>(instance), nullptr, &surface))
+                    {
+                        return uint64_t{};
+                    }
+                    return reinterpret_cast<uint64_t>(surface);
+                });
+            }
+
             void create_window(const ui_window_desc& desc) override
             {
                 this->queue_or_run([this, desc] { this->create_window_impl(desc); });
@@ -980,6 +1041,7 @@ namespace sogen
                 {
                     flags |= SDL_WINDOW_RESIZABLE;
                 }
+                flags |= SDL_WINDOW_VULKAN;
 
                 // Size the host window to the client area; we render no frame, so sizing to it keeps the present 1:1.
                 const auto width = std::max<int>(1, static_cast<int>(desc.rect.right - desc.rect.left) - desc.client_insets.left -
@@ -1198,12 +1260,8 @@ namespace sogen
             }
 
           private:
-            // SDL windows are thread-affine: only their owning thread's message pump services the
-            // cross-thread SendMessage that host calls such as SDL_ShowWindow issue, so every SDL
-            // operation must run on the one thread that calls pump_events. With multiple vCPUs the
-            // syscall handlers run on different worker threads, so operations they trigger are queued
-            // here and executed on the pump thread. Every ui_backend method returns void, so the
-            // callers never need a result and this can stay fully asynchronous.
+            // SDL windows are thread-affine. Operations from vCPU workers are queued to the UI thread;
+            // the synchronous variant is reserved for Vulkan setup that must return a native handle.
             void queue_or_run(std::function<void()> task)
             {
                 {
@@ -1217,6 +1275,37 @@ namespace sogen
 
                 task();
             }
+            template <typename Fn>
+            auto run_sync(Fn task) -> std::invoke_result_t<Fn>
+            {
+                using result_type = std::invoke_result_t<Fn>;
+                static_assert(!std::is_void_v<result_type>);
+
+                std::future<result_type> future;
+                bool run_direct{};
+                {
+                    const std::lock_guard lock(this->command_mutex_);
+                    run_direct = !this->ui_thread_known_ || this->ui_thread_id_ == std::this_thread::get_id();
+                    if (!run_direct)
+                    {
+                        auto promise = std::make_shared<std::promise<result_type>>();
+                        future = promise->get_future();
+                        this->commands_.emplace_back([task = std::move(task), promise = std::move(promise)]() mutable {
+                            try
+                            {
+                                promise->set_value(task());
+                            }
+                            catch (...)
+                            {
+                                promise->set_exception(std::current_exception());
+                            }
+                        });
+                    }
+                }
+
+                return run_direct ? task() : future.get();
+            }
+
 
             void drain_commands()
             {
