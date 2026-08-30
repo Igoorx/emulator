@@ -163,8 +163,7 @@ namespace sogen
         bool is_builtin_window_class_name(const std::u16string_view class_name)
         {
             const auto normalized = normalize_builtin_window_class_name(class_name);
-            return normalized == builtin_dialog_class_name || normalized == u"Button" || normalized == u"Edit" ||
-                   normalized == u"Static";
+            return normalized == builtin_dialog_class_name || normalized == u"Button" || normalized == u"Edit" || normalized == u"Static";
         }
 
         uint16_t get_builtin_window_fnid(const std::u16string_view class_name)
@@ -5058,13 +5057,13 @@ namespace sogen
         ULONG handle_NtUserGetAtomName(const syscall_context& c, const RTL_ATOM atom,
                                        const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> atom_name)
         {
-            const auto name = c.proc.get_atom_name(atom);
-            if (!name || !atom_name)
+            const auto name = resolve_atom_name(c, atom);
+            if (name.empty() || !atom_name)
             {
                 return 0;
             }
 
-            const size_t name_length_bytes = name->size() * sizeof(char16_t);
+            const size_t name_length_bytes = name.size() * sizeof(char16_t);
 
             bool too_small = false;
             ULONG result = 0;
@@ -5082,7 +5081,7 @@ namespace sogen
 
                 if (copy_bytes)
                 {
-                    c.emu.write_memory(str.Buffer, name->data(), copy_bytes);
+                    c.emu.write_memory(str.Buffer, name.data(), copy_bytes);
                 }
 
                 constexpr char16_t terminator = 0;
