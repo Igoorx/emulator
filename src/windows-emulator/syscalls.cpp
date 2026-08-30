@@ -765,6 +765,7 @@ namespace sogen
         uint64_t handle_NtGdiSelectFont(const syscall_context& c, hdc dc, uint64_t font);
         hdc handle_NtGdiGetDCforBitmap(const syscall_context& c, handle bitmap);
         BOOL handle_NtGdiGetDCDword(const syscall_context& c, hdc dc, uint32_t index, emulator_pointer result);
+        BOOL handle_NtGdiGetAndSetDCDword(const syscall_context& c, hdc dc, uint32_t method, uint32_t value, emulator_pointer result);
         BOOL handle_NtGdiSetBrushOrg(const syscall_context& c, hdc dc, int x, int y, emulator_pointer prev);
         uint64_t handle_NtGdiHfontCreate(const syscall_context& c, emulator_pointer logfont, uint32_t angle);
         uint32_t handle_NtGdiExtGetObjectW(const syscall_context& c, uint32_t handle_value, uint32_t size, emulator_pointer buffer);
@@ -778,6 +779,8 @@ namespace sogen
         uint32_t handle_NtGdiGetTextMetricsW(const syscall_context& c, hdc dc, emulator_pointer ptm, uint32_t cj);
         int32_t handle_NtGdiGetTextFaceW(const syscall_context& c, hdc dc, int32_t count, emulator_pointer face_name, BOOL alias_name);
         uint32_t handle_NtGdiGetKerningPairs(const syscall_context& c, hdc dc, uint32_t pair_count, emulator_pointer pairs);
+        uint32_t handle_NtGdiGetGlyphIndicesW(const syscall_context& c, hdc dc, emulator_pointer text, int32_t char_count,
+                                              emulator_pointer glyph_indices, uint32_t flags);
         uint32_t handle_NtGdiGetGlyphOutline(const syscall_context& c, hdc dc, UINT character, UINT format, emulator_pointer glyph_metrics,
                                              DWORD buffer_size, emulator_pointer buffer, emulator_pointer mat2);
         uint32_t handle_NtGdiGetOutlineTextMetricsInternalW(const syscall_context& c, hdc dc, uint32_t cj_copy, emulator_pointer metrics,
@@ -1378,6 +1381,7 @@ namespace sogen
         add_handler(NtGdiSelectBitmap);
         add_handler(NtGdiGetDCforBitmap);
         add_handler(NtGdiGetDCDword);
+        add_handler(NtGdiGetAndSetDCDword);
         add_handler(NtGdiSetBrushOrg);
         add_handler(NtGdiHfontCreate);
         add_handler(NtGdiExtGetObjectW);
@@ -1392,6 +1396,7 @@ namespace sogen
         add_handler(NtGdiGetTextExtent);
         add_handler(NtGdiGetCharWidthW);
         add_handler(NtGdiGetCharABCWidthsW);
+        add_handler(NtGdiGetGlyphIndicesW);
         add_handler(NtGdiGetGlyphOutline);
         add_handler(NtGdiCreateRectRgn);
         add_handler(NtGdiGetRandomRgn);
