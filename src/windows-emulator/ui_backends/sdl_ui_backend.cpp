@@ -686,6 +686,11 @@ namespace sogen
             {
                 this->reset();
 
+                if (this->vulkan_library_loaded_)
+                {
+                    SDL_Vulkan_UnloadLibrary();
+                }
+
                 if (this->initialized_)
                 {
                     SDL_QuitSubSystem(SDL_INIT_VIDEO);
@@ -729,12 +734,12 @@ namespace sogen
                     }
                 }
 
+                this->drain_commands();
                 if (!this->ensure_initialized())
                 {
                     return;
                 }
 
-                this->drain_commands();
                 this->deliver_pending_key_releases();
 
                 SDL_Event event{};
@@ -951,6 +956,14 @@ namespace sogen
                     {
                         return extensions;
                     }
+                    if (!this->vulkan_library_loaded_)
+                    {
+                        if (!SDL_Vulkan_LoadLibrary(nullptr))
+                        {
+                            return extensions;
+                        }
+                        this->vulkan_library_loaded_ = true;
+                    }
 
                     Uint32 count{};
                     const auto* names = SDL_Vulkan_GetInstanceExtensions(&count);
@@ -995,6 +1008,8 @@ namespace sogen
                     VkSurfaceKHR surface{};
                     if (!SDL_Vulkan_CreateSurface(state->window, reinterpret_cast<VkInstance>(instance), nullptr, &surface))
                     {
+                        state->renderer = SDL_CreateRenderer(state->window, nullptr);
+                        render_window(*state);
                         return uint64_t{};
                     }
                     return reinterpret_cast<uint64_t>(surface);
@@ -1050,6 +1065,11 @@ namespace sogen
                                                          desc.client_insets.bottom);
                 const auto title = make_host_window_title(desc.title);
                 auto* window = SDL_CreateWindow(title.c_str(), static_cast<int>(width), static_cast<int>(height), flags);
+                if (!window && (flags & SDL_WINDOW_VULKAN) != 0)
+                {
+                    flags &= ~SDL_WINDOW_VULKAN;
+                    window = SDL_CreateWindow(title.c_str(), static_cast<int>(width), static_cast<int>(height), flags);
+                }
                 if (!window)
                 {
                     return;
@@ -1540,6 +1560,10 @@ namespace sogen
 
             static void render_window(window_state& state)
             {
+                if (!state.renderer)
+                {
+                    return;
+                }
                 if (state.has_surface && state.texture)
                 {
                     // The guest renders at a fixed resolution; fit it into the (independently sized) host window
@@ -1646,6 +1670,7 @@ namespace sogen
 
             event_sink sink_{};
             bool initialized_{};
+            bool vulkan_library_loaded_{};
             hwnd active_window_{};
             uint16_t mouse_button_state_{};
             std::array<bool, SDL_SCANCODE_COUNT> key_down_{};
