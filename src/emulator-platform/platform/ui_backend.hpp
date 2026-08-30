@@ -114,6 +114,7 @@ namespace sogen
         virtual uint64_t create_vulkan_surface(const hwnd /*window*/, const uint64_t /*instance*/)
         {
             return 0;
+        }
 
         // Warp the host cursor so it tracks a guest SetCursorPos. Without this, the next host mouse-motion
         // event reports the (unchanged) host position and overwrites the recentered guest cursor, making
