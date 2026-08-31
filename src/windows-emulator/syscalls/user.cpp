@@ -29,6 +29,7 @@ namespace sogen
         constexpr uint32_t k_fn_in_lp_window_pos_callback_id = 0x11;
         constexpr uint32_t k_fn_inout_lp_point5_callback_id = 0x12;
         constexpr uint32_t k_fn_inout_nc_calc_size_callback_id = 0x15;
+        constexpr size_t k_client_pfn_def_window_wndproc_index = 4;
         constexpr size_t k_client_pfn_button_wndproc_index = 7;
         constexpr size_t k_client_pfn_dialog_wndproc_index = 10;
         constexpr size_t k_client_pfn_edit_wndproc_index = 11;
@@ -163,7 +164,8 @@ namespace sogen
         bool is_builtin_window_class_name(const std::u16string_view class_name)
         {
             const auto normalized = normalize_builtin_window_class_name(class_name);
-            return normalized == builtin_dialog_class_name || normalized == u"Button" || normalized == u"Edit" || normalized == u"Static";
+            return normalized == builtin_dialog_class_name || normalized == u"Button" || normalized == u"Edit" || normalized == u"Static" ||
+                   normalized == u"SysTreeView32" || normalized == u"SysListView32" || normalized == u"msctls_statusbar32";
         }
 
         uint16_t get_builtin_window_fnid(const std::u16string_view class_name)
@@ -254,6 +256,14 @@ namespace sogen
                     if (wnd_proc == 0)
                     {
                         wnd_proc = server_info.apfnClientA[k_client_pfn_dialog_wndproc_index];
+                    }
+                }
+                else
+                {
+                    wnd_proc = server_info.apfnClientW[k_client_pfn_def_window_wndproc_index];
+                    if (wnd_proc == 0)
+                    {
+                        wnd_proc = server_info.apfnClientA[k_client_pfn_def_window_wndproc_index];
                     }
                 }
             });
