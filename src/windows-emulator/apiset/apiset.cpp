@@ -149,6 +149,8 @@ namespace sogen
 
                 if (!ns_entry.ValueCount)
                 {
+                    ns_entries_obj.write(ns_entry, i);
+                    hash_entries_obj.write(hash_entry, i);
                     continue;
                 }
 
@@ -176,6 +178,10 @@ namespace sogen
                 ns_entries_obj.write(ns_entry, i);
                 hash_entries_obj.write(hash_entry, i);
             }
+
+            api_set_map_obj.access([&](API_SET_NAMESPACE& api_set) {
+                api_set.Size = static_cast<ULONG>(allocator.get_next_address() - api_set_map_obj.value());
+            });
 
             return api_set_map_obj;
         }
