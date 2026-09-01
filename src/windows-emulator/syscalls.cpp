@@ -579,10 +579,12 @@ namespace sogen
         BOOL handle_NtUserTranslateMessage(const syscall_context& c, emulator_object<msg> message, UINT flags);
         BOOL handle_NtUserGetMessage(const syscall_context& c, emulator_object<msg> message, hwnd hwnd, UINT msg_filter_min,
                                      UINT msg_filter_max);
+        DWORD handle_NtUserGetMessagePos(const syscall_context& c);
         BOOL handle_NtUserPeekMessage(const syscall_context& c, emulator_object<msg> message, hwnd hwnd, UINT msg_filter_min,
                                       UINT msg_filter_max, UINT remove_message);
         BOOL handle_NtUserWaitMessage(const syscall_context& c);
         BOOL handle_NtUserInvalidateRect(const syscall_context& c, hwnd hwnd, emulator_object<RECT> rect, BOOL erase);
+        int32_t handle_NtUserScrollWindowEx();
         BOOL handle_NtUserValidateRect(const syscall_context& c, hwnd hwnd, emulator_object<RECT> rect);
         BOOL handle_NtUserGetUpdateRect(const syscall_context& c, hwnd hwnd, emulator_object<RECT> rect, BOOL erase);
         BOOL handle_NtUserUpdateWindow(const syscall_context& c, hwnd hwnd);
@@ -1582,10 +1584,12 @@ namespace sogen
         add_handler(NtUserMessageCall);
         add_handler(NtUserDispatchMessage);
         add_handler(NtUserTranslateMessage);
+        add_handler(NtUserGetMessagePos);
         add_handler(NtUserGetMessage);
         add_handler(NtUserPeekMessage);
         add_handler(NtUserWaitMessage);
         add_handler(NtUserInvalidateRect);
+        add_handler(NtUserScrollWindowEx);
         add_handler(NtUserValidateRect);
         add_handler(NtUserGetUpdateRect);
         add_handler(NtUserUpdateWindow);
