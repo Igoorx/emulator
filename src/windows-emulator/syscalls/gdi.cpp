@@ -28,6 +28,7 @@ namespace sogen
             constexpr uint8_t k_gdi_font_type = 0x0A;
             constexpr uint8_t k_gdi_brush_type = 0x10;
             constexpr uint8_t k_gdi_pen_type = 0x30;
+            constexpr int32_t k_gdi_dc_object_bitmap = 0x50000;
 
             constexpr uint32_t k_gdi_dc_attr_size = 0x130;
             constexpr uint32_t k_gdi_brush_attr_size = 0x20;
@@ -1441,6 +1442,25 @@ namespace sogen
                 return handle_value;
             }
 
+            uint32_t ensure_memory_dc_default_bitmap(const syscall_context& c)
+            {
+                const auto default_bitmap = c.proc.gdi_memory_dc_default_bitmap_handle;
+                if (default_bitmap != 0 && c.proc.gdi_bitmap_surfaces.contains(default_bitmap))
+                {
+                    return default_bitmap;
+                }
+
+                gdi_bitmap_surface* surface = nullptr;
+                const auto created_bitmap = create_gdi_bitmap_surface(c, "compatible-dc-default", 1, 1, 0xFF000000u, &surface);
+                if (surface != nullptr)
+                {
+                    surface->guest_bpp = 1;
+                }
+
+                c.proc.gdi_memory_dc_default_bitmap_handle = created_bitmap;
+                return created_bitmap;
+            }
+
             hdc ensure_default_hdc(const syscall_context& c)
             {
                 if (c.proc.gdi_default_dc_handle != 0)
@@ -1794,7 +1814,7 @@ namespace sogen
 
         COLORREF handle_NtGdiGetNearestColor(const syscall_context&, const hdc dc, const COLORREF color)
         {
-            constexpr COLORREF result = 0;
+            const auto result = static_cast<COLORREF>(color & 0x00FFFFFFu);
             paint_trace::log("gdi.nearest-color hdc=0x%08" PRIx32 " requested=%08" PRIx32 " returned=%08" PRIx32, static_cast<uint32_t>(dc),
                              color, result);
             return result;
@@ -2042,9 +2062,7 @@ namespace sogen
 
             it->second.is_memory_dc = true;
 
-            // Memory DCs begin with a default monochrome bitmap selected, and SelectObject
-            // returns that previous bitmap on the first real bitmap selection.
-            const auto default_bitmap = create_gdi_bitmap_surface(c, "compatible-dc-default", 1, 1, 0xFF000000u);
+            const auto default_bitmap = ensure_memory_dc_default_bitmap(c);
             if (default_bitmap == 0)
             {
                 return 0;
@@ -2720,6 +2738,11 @@ namespace sogen
                 c.win_emu.memory.release_memory(entry.Object, 0);
             }
 
+            if (handle_value == c.proc.gdi_memory_dc_default_bitmap_handle)
+            {
+                c.proc.gdi_memory_dc_default_bitmap_handle = 0;
+            }
+
             c.proc.gdi_dc_states.erase(handle_value);
             c.proc.gdi_bitmap_surfaces.erase(handle_value);
             return 1;
@@ -2757,15 +2780,18 @@ namespace sogen
                              static_cast<uint32_t>(it->second.target_window), it->second.current_x, it->second.current_y);
             trace_bitmap_owners("gdi.select-bitmap-before", c, bitmap_handle);
 
-            for (const auto& [other_dc, state] : c.proc.gdi_dc_states)
+            if (bitmap_handle != c.proc.gdi_memory_dc_default_bitmap_handle)
             {
-                if (other_dc != static_cast<uint32_t>(dc) && state.selected_bitmap == bitmap_handle)
+                for (const auto& [other_dc, state] : c.proc.gdi_dc_states)
                 {
-                    paint_trace::log("gdi.select-bitmap hdc=0x%08" PRIx32 " bitmap=0x%08" PRIx32
-                                     " failed=already-selected other-hdc=0x%08" PRIx32,
-                                     static_cast<uint32_t>(dc), bitmap_handle, other_dc);
-                    trace_bitmap_owners("gdi.select-bitmap-conflict", c, bitmap_handle);
-                    return 0;
+                    if (other_dc != static_cast<uint32_t>(dc) && state.selected_bitmap == bitmap_handle)
+                    {
+                        paint_trace::log("gdi.select-bitmap hdc=0x%08" PRIx32 " bitmap=0x%08" PRIx32
+                                         " failed=already-selected other-hdc=0x%08" PRIx32,
+                                         static_cast<uint32_t>(dc), bitmap_handle, other_dc);
+                        trace_bitmap_owners("gdi.select-bitmap-conflict", c, bitmap_handle);
+                        return 0;
+                    }
                 }
             }
 
@@ -4287,9 +4313,21 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtGdiGetDCObject()
+        uint64_t handle_NtGdiGetDCObject(const syscall_context& c, const hdc dc, const int32_t object_type)
         {
-            return STATUS_SUCCESS;
+            if (object_type != k_gdi_dc_object_bitmap)
+            {
+                return 0;
+            }
+
+            const auto dc_it = c.proc.gdi_dc_states.find(static_cast<uint32_t>(dc));
+            if (dc_it == c.proc.gdi_dc_states.end())
+            {
+                return 0;
+            }
+
+            const auto bitmap = dc_it->second.selected_bitmap;
+            return c.proc.gdi_bitmap_surfaces.contains(bitmap) ? bitmap : 0;
         }
 
         BOOL handle_NtGdiUnrealizeObject(const syscall_context& c, const handle h)
