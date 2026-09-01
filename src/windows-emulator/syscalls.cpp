@@ -686,6 +686,7 @@ namespace sogen
         BOOL handle_NtUserGetObjectInformation();
         uint64_t handle_NtUserQueryWindow(const syscall_context& c, hwnd window_handle, uint32_t query_type);
         int handle_NtUserSetScrollInfo();
+        BOOL handle_NtUserShowScrollBar();
         BOOL handle_NtUserIsTouchWindow();
         BOOL handle_NtUserGetWindowPlacement(const syscall_context& c, hwnd window_handle, emulator_pointer placement_address);
         BOOL handle_NtUserTrackMouseEvent();
@@ -729,6 +730,7 @@ namespace sogen
         NTSTATUS handle_NtGdiInit(const syscall_context& c);
         NTSTATUS handle_NtGdiInit2(const syscall_context& c);
         uint32_t handle_NtGdiGetDeviceCaps(const syscall_context& c, hdc dc, uint32_t index);
+        COLORREF handle_NtGdiGetNearestColor(const syscall_context& c, hdc dc, COLORREF color);
         uint32_t handle_NtGdiGetDeviceCapsAll(const syscall_context& c, hdc dc, emulator_pointer caps);
         uint32_t handle_NtGdiComputeXformCoefficients(const syscall_context& c, hdc dc);
         BOOL handle_NtGdiFlush(const syscall_context& c);
@@ -1365,6 +1367,7 @@ namespace sogen
         add_handler(NtAlpcSendWaitReceivePort);
         add_handler(NtGdiInit);
         add_handler(NtGdiGetDeviceCaps);
+        add_handler(NtGdiGetNearestColor);
         add_handler(NtGdiGetDeviceCapsAll);
         add_handler(NtGdiComputeXformCoefficients);
         add_handler(NtGdiFlush);
@@ -1745,6 +1748,7 @@ namespace sogen
         add_handler(NtUserGetObjectInformation);
         add_handler(NtUserQueryWindow);
         add_handler(NtUserSetScrollInfo);
+        add_handler(NtUserShowScrollBar);
         add_handler(NtUserTrackMouseEvent);
         add_handler(NtGdiGetOutlineTextMetricsInternalW);
         add_handler(NtGdiSetPixel);
