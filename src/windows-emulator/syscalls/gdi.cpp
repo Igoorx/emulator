@@ -1354,8 +1354,67 @@ namespace sogen
                 return handle_value;
             }
 
-            uint32_t create_gdi_bitmap_surface(const syscall_context& c, const uint32_t width, const uint32_t height,
-                                               const uint32_t fill = k_default_bitmap_fill,
+            void trace_bitmap_surface(const char* const event, const uint32_t bitmap_handle, const gdi_bitmap_surface& surface)
+            {
+                if (!paint_trace::enabled())
+                {
+                    return;
+                }
+
+                paint_trace::log("%s bitmap=0x%08" PRIx32 " size=%ux%u pixels=%zu guest-bits=0x%" PRIx64
+                                 " guest-stride=%u guest-bpp=%u top-down=%d owns-memory=%d",
+                                 event, bitmap_handle, surface.width, surface.height, surface.pixels.size(),
+                                 static_cast<uint64_t>(surface.guest_bits), surface.guest_stride, surface.guest_bpp,
+                                 surface.guest_top_down ? 1 : 0, surface.guest_owns_memory ? 1 : 0);
+            }
+
+            void trace_bitmap_owners(const char* const event, const syscall_context& c, const uint32_t bitmap_handle)
+            {
+                if (!paint_trace::enabled() || bitmap_handle == 0)
+                {
+                    return;
+                }
+
+                size_t active_owner_count = 0;
+                for (const auto& [dc_handle, state] : c.proc.gdi_dc_states)
+                {
+                    if (state.selected_bitmap != bitmap_handle)
+                    {
+                        continue;
+                    }
+
+                    paint_trace::log("%s bitmap=0x%08" PRIx32 " active-owner=%zu hdc=0x%08" PRIx32 " memory=%d target=0x%08" PRIx32
+                                     " origin=[%d,%d]",
+                                     event, bitmap_handle, active_owner_count, dc_handle, state.is_memory_dc ? 1 : 0,
+                                     static_cast<uint32_t>(state.target_window), state.current_x, state.current_y);
+                    ++active_owner_count;
+                }
+
+                size_t saved_owner_count = 0;
+                for (const auto& [dc_handle, stack] : c.proc.gdi_dc_save_states)
+                {
+                    for (size_t depth = 0; depth < stack.size(); ++depth)
+                    {
+                        const auto& saved = stack[depth];
+                        if (saved.selected_bitmap != bitmap_handle)
+                        {
+                            continue;
+                        }
+
+                        paint_trace::log("%s bitmap=0x%08" PRIx32 " saved-owner=%zu hdc=0x%08" PRIx32
+                                         " depth=%zu memory=%d target=0x%08" PRIx32 " origin=[%d,%d]",
+                                         event, bitmap_handle, saved_owner_count, dc_handle, depth, saved.is_memory_dc ? 1 : 0,
+                                         static_cast<uint32_t>(saved.target_window), saved.current_x, saved.current_y);
+                        ++saved_owner_count;
+                    }
+                }
+
+                paint_trace::log("%s bitmap=0x%08" PRIx32 " active-owners=%zu saved-owners=%zu", event, bitmap_handle, active_owner_count,
+                                 saved_owner_count);
+            }
+
+            uint32_t create_gdi_bitmap_surface(const syscall_context& c, const char* const source, const uint32_t width,
+                                               const uint32_t height, const uint32_t fill = k_default_bitmap_fill,
                                                gdi_bitmap_surface** const created_surface = nullptr)
             {
                 if (created_surface != nullptr)
@@ -1373,6 +1432,8 @@ namespace sogen
                 surface.width = width;
                 surface.height = height;
                 surface.pixels.assign(static_cast<size_t>(width) * static_cast<size_t>(height), fill);
+                paint_trace::log("gdi.bitmap-create source=%s bitmap=0x%08" PRIx32 " size=%ux%u fill=%08" PRIx32, source, handle_value,
+                                 width, height, fill);
                 if (created_surface != nullptr)
                 {
                     *created_surface = &surface;
@@ -1983,13 +2044,16 @@ namespace sogen
 
             // Memory DCs begin with a default monochrome bitmap selected, and SelectObject
             // returns that previous bitmap on the first real bitmap selection.
-            const auto default_bitmap = create_gdi_bitmap_surface(c, 1, 1, 0xFF000000u);
+            const auto default_bitmap = create_gdi_bitmap_surface(c, "compatible-dc-default", 1, 1, 0xFF000000u);
             if (default_bitmap == 0)
             {
                 return 0;
             }
 
             it->second.selected_bitmap = default_bitmap;
+            paint_trace::log("gdi.memory-dc-create hdc=0x%08" PRIx32 " default-bitmap=0x%08" PRIx32, static_cast<uint32_t>(dc),
+                             default_bitmap);
+            trace_bitmap_owners("gdi.memory-dc-create", c, default_bitmap);
             return dc;
         }
 
@@ -2021,6 +2085,10 @@ namespace sogen
             }
 
             stack.push_back(snapshot);
+            paint_trace::log("gdi.save-dc hdc=0x%08" PRIx32 " level=%zu bitmap=0x%08" PRIx32 " memory=%d target=0x%08" PRIx32, dc_value,
+                             stack.size(), snapshot.selected_bitmap, snapshot.is_memory_dc ? 1 : 0,
+                             static_cast<uint32_t>(snapshot.target_window));
+            trace_bitmap_owners("gdi.save-dc", c, snapshot.selected_bitmap);
             return static_cast<int32_t>(stack.size());
         }
 
@@ -2056,8 +2124,30 @@ namespace sogen
                 target_index = static_cast<size_t>(saved_dc) - 1;
             }
 
+            const bool tracing = paint_trace::enabled();
+            uint32_t previous_bitmap = 0;
+            uint32_t restored_bitmap = 0;
+            if (tracing)
+            {
+                if (const auto previous = c.proc.gdi_dc_states.find(dc_value); previous != c.proc.gdi_dc_states.end())
+                {
+                    previous_bitmap = previous->second.selected_bitmap;
+                }
+                restored_bitmap = stack[target_index].selected_bitmap;
+            }
             c.proc.gdi_dc_states[dc_value] = stack[target_index];
             stack.resize(target_index);
+            if (tracing)
+            {
+                paint_trace::log("gdi.restore-dc hdc=0x%08" PRIx32 " saved=%d old-bitmap=0x%08" PRIx32 " restored-bitmap=0x%08" PRIx32
+                                 " remaining-saves=%zu",
+                                 dc_value, saved_dc, previous_bitmap, restored_bitmap, stack.size());
+                trace_bitmap_owners("gdi.restore-dc", c, restored_bitmap);
+                if (previous_bitmap != restored_bitmap)
+                {
+                    trace_bitmap_owners("gdi.restore-dc-released", c, previous_bitmap);
+                }
+            }
             return TRUE;
         }
 
@@ -2098,14 +2188,14 @@ namespace sogen
 
         uint64_t handle_NtGdiCreateCompatibleBitmap(const syscall_context& c, const hdc /*dc*/, const uint32_t width, const uint32_t height)
         {
-            return create_gdi_bitmap_surface(c, width, height);
+            return create_gdi_bitmap_surface(c, "compatible-bitmap", width, height);
         }
 
         uint64_t handle_NtGdiCreateBitmap(const syscall_context& c, const uint32_t width, const uint32_t height, const uint32_t planes,
                                           const uint32_t bits_pixel, const emulator_pointer bits)
         {
             gdi_bitmap_surface* surface = nullptr;
-            const auto handle_value = create_gdi_bitmap_surface(c, width, height, k_default_bitmap_fill, &surface);
+            const auto handle_value = create_gdi_bitmap_surface(c, "bitmap", width, height, k_default_bitmap_fill, &surface);
             if (surface != nullptr)
             {
                 if (bits != 0 && planes == 1 && bits_pixel == 32)
@@ -2235,7 +2325,7 @@ namespace sogen
             c.emu.write_memory(guest_bits, zeroed.data(), zeroed.size());
 
             gdi_bitmap_surface* surface = nullptr;
-            const auto handle_value = create_gdi_bitmap_surface(c, width, abs_height, 0, &surface);
+            const auto handle_value = create_gdi_bitmap_surface(c, "dib-section", width, abs_height, 0, &surface);
             if (handle_value == 0)
             {
                 c.win_emu.memory.release_memory(guest_bits, 0);
@@ -2247,6 +2337,7 @@ namespace sogen
             surface->guest_bpp = header.biBitCount;
             surface->guest_top_down = header.biHeight < 0;
             surface->guest_owns_memory = true;
+            trace_bitmap_surface("gdi.bitmap-dib-section", handle_value, *surface);
 
             bits.write(guest_bits);
             return handle_value;
@@ -2258,7 +2349,7 @@ namespace sogen
                                                     const uint32_t /*cj*/, const uint32_t /*i_usage*/)
         {
             gdi_bitmap_surface* surface = nullptr;
-            const auto handle_value = create_gdi_bitmap_surface(c, width, height, k_default_bitmap_fill, &surface);
+            const auto handle_value = create_gdi_bitmap_surface(c, "dibitmap", width, height, k_default_bitmap_fill, &surface);
             if (surface != nullptr)
             {
                 if (bits != 0)
@@ -2598,6 +2689,26 @@ namespace sogen
             {
                 c.proc.gdi_default_dc_handle = 0;
             }
+            if (paint_trace::enabled())
+            {
+                const auto saved_state_it = c.proc.gdi_dc_save_states.find(handle_value);
+                const auto saved_state_count =
+                    saved_state_it != c.proc.gdi_dc_save_states.end() ? saved_state_it->second.size() : size_t{0};
+                if (const auto dc_it = c.proc.gdi_dc_states.find(handle_value); dc_it != c.proc.gdi_dc_states.end())
+                {
+                    const auto& state = dc_it->second;
+                    paint_trace::log("gdi.dc-delete hdc=0x%08" PRIx32 " memory=%d selected-bitmap=0x%08" PRIx32 " target=0x%08" PRIx32
+                                     " saved-states=%zu",
+                                     handle_value, state.is_memory_dc ? 1 : 0, state.selected_bitmap,
+                                     static_cast<uint32_t>(state.target_window), saved_state_count);
+                    trace_bitmap_owners("gdi.dc-delete", c, state.selected_bitmap);
+                }
+                if (const auto bitmap_it = c.proc.gdi_bitmap_surfaces.find(handle_value); bitmap_it != c.proc.gdi_bitmap_surfaces.end())
+                {
+                    trace_bitmap_surface("gdi.bitmap-delete", handle_value, bitmap_it->second);
+                    trace_bitmap_owners("gdi.bitmap-delete-owners", c, handle_value);
+                }
+            }
 
             if (const auto bmp_it = c.proc.gdi_bitmap_surfaces.find(handle_value);
                 bmp_it != c.proc.gdi_bitmap_surfaces.end() && bmp_it->second.guest_owns_memory && bmp_it->second.guest_bits != 0)
@@ -2639,6 +2750,13 @@ namespace sogen
                 return 0;
             }
 
+            const auto old = it->second.selected_bitmap;
+            paint_trace::log("gdi.select-bitmap request hdc=0x%08" PRIx32 " old=0x%08" PRIx32 " requested=0x%08" PRIx32
+                             " memory=%d target=0x%08" PRIx32 " origin=[%d,%d]",
+                             static_cast<uint32_t>(dc), old, bitmap_handle, it->second.is_memory_dc ? 1 : 0,
+                             static_cast<uint32_t>(it->second.target_window), it->second.current_x, it->second.current_y);
+            trace_bitmap_owners("gdi.select-bitmap-before", c, bitmap_handle);
+
             for (const auto& [other_dc, state] : c.proc.gdi_dc_states)
             {
                 if (other_dc != static_cast<uint32_t>(dc) && state.selected_bitmap == bitmap_handle)
@@ -2646,14 +2764,19 @@ namespace sogen
                     paint_trace::log("gdi.select-bitmap hdc=0x%08" PRIx32 " bitmap=0x%08" PRIx32
                                      " failed=already-selected other-hdc=0x%08" PRIx32,
                                      static_cast<uint32_t>(dc), bitmap_handle, other_dc);
+                    trace_bitmap_owners("gdi.select-bitmap-conflict", c, bitmap_handle);
                     return 0;
                 }
             }
 
-            const auto old = it->second.selected_bitmap;
             it->second.selected_bitmap = bitmap_handle;
             paint_trace::log("gdi.select-bitmap hdc=0x%08" PRIx32 " old=0x%08" PRIx32 " new=0x%08" PRIx32, static_cast<uint32_t>(dc), old,
                              bitmap_handle);
+            trace_bitmap_owners("gdi.select-bitmap-after", c, bitmap_handle);
+            if (old != bitmap_handle)
+            {
+                trace_bitmap_owners("gdi.select-bitmap-released", c, old);
+            }
             return old;
         }
 
@@ -2665,14 +2788,17 @@ namespace sogen
         hdc handle_NtGdiGetDCforBitmap(const syscall_context& c, const handle bitmap)
         {
             const auto bitmap_handle = static_cast<uint32_t>(bitmap.bits);
+            trace_bitmap_owners("gdi.get-dc-for-bitmap", c, bitmap_handle);
             for (const auto& [dc_handle, dc_state] : c.proc.gdi_dc_states)
             {
                 if (dc_state.is_memory_dc && dc_state.selected_bitmap == bitmap_handle)
                 {
+                    paint_trace::log("gdi.get-dc-for-bitmap bitmap=0x%08" PRIx32 " result=0x%08" PRIx32, bitmap_handle, dc_handle);
                     return static_cast<hdc>(dc_handle);
                 }
             }
 
+            paint_trace::log("gdi.get-dc-for-bitmap bitmap=0x%08" PRIx32 " result=0x00000000", bitmap_handle);
             return 0;
         }
 
@@ -5104,7 +5230,7 @@ namespace sogen
             }
 
             gdi_bitmap_surface* surface = nullptr;
-            const auto bitmap_handle = create_gdi_bitmap_surface(c, params.Width, params.Height, 0, &surface);
+            const auto bitmap_handle = create_gdi_bitmap_surface(c, "d3dkmt-memory", params.Width, params.Height, 0, &surface);
             if (bitmap_handle == 0)
             {
                 return STATUS_NO_MEMORY;
