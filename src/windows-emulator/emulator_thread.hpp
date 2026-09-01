@@ -345,6 +345,7 @@ namespace sogen
         uint64_t next_user_timer_id{1};
         std::vector<msg> message_queue;
         DWORD current_message_time{};
+        DWORD current_message_position{};
         std::array<uint32_t, 32> message_queue_status_bit_counts{};
         uint32_t message_queue_status_bits{};
         uint32_t queue_status_changed_bits{};
@@ -360,6 +361,14 @@ namespace sogen
         bool has_pending_alertable_apc() const
         {
             return this->apc_alertable && !this->pending_apcs.empty();
+        }
+
+        void record_current_message(const msg& message)
+        {
+            this->current_message_time = message.time;
+            const auto x = static_cast<uint16_t>(message.pt.x);
+            const auto y = static_cast<uint16_t>(message.pt.y);
+            this->current_message_position = static_cast<DWORD>(x) | (static_cast<DWORD>(y) << 16);
         }
 
         user_timer* find_user_timer(hwnd hwnd, uint64_t timer_id);
@@ -469,6 +478,7 @@ namespace sogen
             buffer.write(this->next_user_timer_id);
             buffer.write_vector(this->message_queue);
             buffer.write(this->current_message_time);
+            buffer.write(this->current_message_position);
             buffer.write(this->message_queue_status_bit_counts);
             buffer.write(this->message_queue_status_bits);
             buffer.write(this->queue_status_changed_bits);
@@ -538,6 +548,7 @@ namespace sogen
             buffer.read(this->next_user_timer_id);
             buffer.read_vector(this->message_queue);
             buffer.read(this->current_message_time);
+            buffer.read(this->current_message_position);
             buffer.read(this->message_queue_status_bit_counts);
             buffer.read(this->message_queue_status_bits);
             buffer.read(this->queue_status_changed_bits);

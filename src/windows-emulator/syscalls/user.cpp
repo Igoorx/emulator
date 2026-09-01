@@ -3973,6 +3973,11 @@ namespace sogen
             return FALSE;
         }
 
+        DWORD handle_NtUserGetMessagePos(const syscall_context& c)
+        {
+            return c.vcpu.active_thread ? c.vcpu.active_thread->current_message_position : 0;
+        }
+
         BOOL handle_NtUserGetMessage(const syscall_context& c, const emulator_object<msg> message, const hwnd hwnd,
                                      const UINT msg_filter_min, const UINT msg_filter_max)
         {
@@ -3981,7 +3986,7 @@ namespace sogen
             if (auto pending_msg = t.peek_pending_message(c.win_emu, hwnd, msg_filter_min, msg_filter_max, true))
             {
                 message.write(*pending_msg);
-                t.current_message_time = pending_msg->time;
+                t.record_current_message(*pending_msg);
                 set_thread_window_context(c, pending_msg->window);
                 return pending_msg->message != WM_QUIT ? TRUE : FALSE;
             }
@@ -4003,7 +4008,7 @@ namespace sogen
             if (pending_msg)
             {
                 message.write(*pending_msg);
-                t.current_message_time = pending_msg->time;
+                t.record_current_message(*pending_msg);
                 set_thread_window_context(c, pending_msg->window);
                 return TRUE;
             }
@@ -4040,6 +4045,11 @@ namespace sogen
 
             invalidate_window(c, *win, update_rect, erase != FALSE);
             return TRUE;
+        }
+
+        int32_t handle_NtUserScrollWindowEx()
+        {
+            return 0;
         }
 
         BOOL handle_NtUserValidateRect(const syscall_context& c, const hwnd hwnd, const emulator_object<RECT> /*rect*/)
