@@ -2466,13 +2466,17 @@ namespace sogen
             int32_t bi_height = 0;
             uint16_t bit_count = 0;
             uint32_t compression = 0;
+            uint32_t bi_size = 0;
+            uint32_t clr_used = 0;
+            c.emu.read_memory(info + 0, &bi_size, sizeof(bi_size));
             c.emu.read_memory(info + 4, &bi_width, sizeof(bi_width));
             c.emu.read_memory(info + 8, &bi_height, sizeof(bi_height));
             c.emu.read_memory(info + 14, &bit_count, sizeof(bit_count));
             c.emu.read_memory(info + 16, &compression, sizeof(compression));
+            c.emu.read_memory(info + 32, &clr_used, sizeof(clr_used));
 
             constexpr uint32_t bi_rgb = 0;
-            if ((bit_count != 32 && bit_count != 24) || compression != bi_rgb || bi_width <= 0)
+            if ((bit_count != 4 && bit_count != 32 && bit_count != 24) || compression != bi_rgb || bi_width <= 0)
             {
                 c.win_emu.log.warn("NtGdiSetDIBitsToDeviceInternal: unsupported DIB (bpp=%u compression=%u width=%d)\n", bit_count,
                                    compression, bi_width);
@@ -2483,9 +2487,28 @@ namespace sogen
             const auto src_width = static_cast<uint32_t>(bi_width);
             const auto src_height = static_cast<uint32_t>(top_down ? -bi_height : bi_height);
             const auto stored_rows = std::min(scan_lines, src_height);
-            const size_t bytes_per_pixel = bit_count / 8;
-            // DIB scanlines are DWORD-aligned, not tightly packed.
             const size_t stride = ((static_cast<size_t>(src_width) * bit_count + 31u) / 32u) * 4u;
+
+            std::array<uint32_t, 16> palette{};
+            if (bit_count == 4)
+            {
+                const uint32_t palette_entries = clr_used != 0 ? std::min<uint32_t>(clr_used, 16) : 16;
+                const uint64_t palette_ptr = info + bi_size;
+                for (uint32_t i = 0; i < palette_entries; ++i)
+                {
+                    struct
+                    {
+                        uint8_t blue;
+                        uint8_t green;
+                        uint8_t red;
+                        uint8_t reserved;
+                    } rgb{};
+
+                    c.emu.read_memory(palette_ptr + static_cast<uint64_t>(i) * sizeof(rgb), &rgb, sizeof(rgb));
+                    palette[i] = 0xFF000000u | (static_cast<uint32_t>(rgb.red) << 16) | (static_cast<uint32_t>(rgb.green) << 8) |
+                                 static_cast<uint32_t>(rgb.blue);
+                }
+            }
 
             std::vector<uint8_t> data(stride * stored_rows);
             if (data.empty())
@@ -2521,11 +2544,27 @@ namespace sogen
                     {
                         break;
                     }
-                    const uint8_t* px = row + static_cast<size_t>(src_x) * bytes_per_pixel;
-                    const uint32_t pixel =
-                        static_cast<uint32_t>(px[0]) | (static_cast<uint32_t>(px[1]) << 8) | (static_cast<uint32_t>(px[2]) << 16);
-                    set_surface_pixel(*surface, x_dest + origin_x + static_cast<int>(i), y_dest + origin_y + static_cast<int>(j),
-                                      pixel | 0xFF000000u);
+
+                    uint32_t pixel = 0;
+                    if (bit_count == 32)
+                    {
+                        std::memcpy(&pixel, row + static_cast<size_t>(src_x) * sizeof(uint32_t), sizeof(pixel));
+                        pixel |= 0xFF000000u;
+                    }
+                    else if (bit_count == 24)
+                    {
+                        const uint8_t* px = row + static_cast<size_t>(src_x) * 3;
+                        pixel = static_cast<uint32_t>(px[0]) | (static_cast<uint32_t>(px[1]) << 8) | (static_cast<uint32_t>(px[2]) << 16) |
+                                0xFF000000u;
+                    }
+                    else
+                    {
+                        const uint8_t packed = row[static_cast<size_t>(src_x) / 2u];
+                        const uint8_t index = (src_x & 1u) == 0 ? static_cast<uint8_t>(packed >> 4) : static_cast<uint8_t>(packed & 0x0Fu);
+                        pixel = palette[index];
+                    }
+
+                    set_surface_pixel(*surface, x_dest + origin_x + static_cast<int>(i), y_dest + origin_y + static_cast<int>(j), pixel);
                 }
                 ++copied;
             }
