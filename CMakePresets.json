@@ -23,7 +23,8 @@
                 "build"
             ],
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "SOGEN_ENABLE_LTO": "OFF"
             }
         },
         {
