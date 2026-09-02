@@ -862,6 +862,10 @@ namespace sogen
             case WM_ERASEBKGND:
                 return TRUE;
 
+            case WM_NCPAINT:
+                // TODO: WM_NCPAINT reached this handler because the application expects Sogen to render the non-client frame.
+                return FALSE;
+
             case WM_PAINT:
                 validate_window(win);
                 return FALSE;
