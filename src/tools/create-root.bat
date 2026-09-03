@@ -24,6 +24,8 @@ SET EMU_STEAMDIR=%EMU_FILESYS%\c\steam
 MKDIR %EMU_SYSDIR%
 MKDIR %EMU_SYSDIR_WOW64%
 MKDIR %EMU_CURSORDIR%
+MKDIR %EMU_SYSDIR%\en-US
+MKDIR %EMU_SYSDIR_WOW64%\en-US
 MKDIR %EMU_SORTDIR%
 MKDIR %EMU_WINSXSDIR%
 MKDIR %EMU_WINSXSMANIFESTDIR%
@@ -183,6 +185,8 @@ CALL :collect xaudio2_9.dll
 CALL :collect xinput1_3.dll
 CALL :collect xinput1_4.dll
 CALL :collect xinput9_1_0.dll
+CALL :collect_file "%WINDIR%\System32\en-US", user32.dll.mui, %EMU_SYSDIR%\en-US
+CALL :collect_file "%WINDIR%\SysWOW64\en-US", user32.dll.mui, %EMU_SYSDIR_WOW64%\en-US
 
 CALL :collect locale.nls
 CALL :collect c_1252.nls
