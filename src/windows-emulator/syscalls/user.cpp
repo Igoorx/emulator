@@ -2316,6 +2316,11 @@ namespace sogen
             return TRUE;
         }
 
+        BOOL handle_NtUserUpdateClientRect(const syscall_context& /*c*/, const hwnd /*window*/)
+        {
+            return TRUE;
+        }
+
         BOOL handle_NtUserBitBltSysBmp(const syscall_context& c, const hdc dc, const int x, const int y, const uint32_t bitmap_index)
         {
             (void)handle_NtGdiFlush(c);
