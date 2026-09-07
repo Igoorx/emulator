@@ -4,6 +4,7 @@
 #include "analysis_reporter.hpp"
 #include "disassembler.hpp"
 #include "symbol_loader.hpp"
+#include "snapshot.hpp"
 #include "windows_emulator.hpp"
 #include <utils/lazy_object.hpp>
 
@@ -514,6 +515,17 @@ namespace sogen
             return ++c.traced_call_count;
         }
 
+        void snapshot_before_traced_call(analysis_context& c, const uint64_t call_count)
+        {
+            if (!c.auto_snapshot_before_call || *c.auto_snapshot_before_call != call_count)
+            {
+                return;
+            }
+
+            c.auto_snapshot_before_call.reset();
+            snapshot::write_emulator_snapshot(*c.win_emu);
+        }
+
         bool break_before_traced_call(analysis_context& c, const uint64_t call_count)
         {
             if (!c.auto_break_before_call || *c.auto_break_before_call != call_count)
@@ -651,6 +663,7 @@ namespace sogen
                         event.interesting = is_interesting_call;
                         event.details = std::move(details);
                     });
+                    snapshot_before_traced_call(c, call_count);
                     (void)break_before_traced_call(c, call_count);
                 }
             }
@@ -756,6 +769,7 @@ namespace sogen
                     event.syscall_id = syscall_id;
                     event.syscall_name = std::string(syscall_name);
                 });
+                snapshot_before_traced_call(c, call_count);
 
                 if (break_before_traced_syscall(c, call_count, address))
                 {
@@ -783,6 +797,7 @@ namespace sogen
                         event.caller_module = caller_context.module_name;
                         event.caller_function = caller_context.function;
                     });
+                    snapshot_before_traced_call(c, call_count);
 
                     if (break_before_traced_syscall(c, call_count, address))
                     {
@@ -804,6 +819,7 @@ namespace sogen
                     event.caller_module = caller_context.module_name;
                     event.caller_function = caller_context.function;
                 });
+                snapshot_before_traced_call(c, call_count);
 
                 if (break_before_traced_syscall(c, call_count, address))
                 {

@@ -70,6 +70,7 @@ namespace sogen
             bool pause_before_start{false};
 #endif
             std::optional<uint64_t> break_call{};
+            std::optional<uint64_t> snapshot_call{};
             std::filesystem::path dump{};
             std::filesystem::path minidump_path{};
             std::filesystem::path report_path{};
@@ -619,6 +620,7 @@ namespace sogen
             analysis_context context{
                 .settings = &options,
                 .auto_break_before_call = options.break_call,
+                .auto_snapshot_before_call = options.snapshot_call,
             };
 
             const auto concise_logging = options.concise_logging;
@@ -896,6 +898,7 @@ namespace sogen
                 ->needs(debug_option);
             app.add_option("--break-call", options.break_call, "In GDB mode, stop before the specified traced function/syscall call")
                 ->needs(debug_option);
+            app.add_option("--snapshot-call", options.snapshot_call, "Create a snapshot before the specified traced function/syscall call");
 
             app.add_flag("-s,--silent", options.silent, "Silent mode");
             app.add_flag("-v,--verbose", options.verbose_logging, "Verbose logging");
