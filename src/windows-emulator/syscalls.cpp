@@ -737,6 +737,7 @@ namespace sogen
         BOOL handle_NtUserGetPointerDevices();
         BOOL handle_NtUserHwndQueryRedirectionInfo();
         BOOL handle_NtUserEnableNonClientDpiScaling();
+        BOOL handle_NtUserIsChildWindowDpiMessageEnabled();
         BOOL handle_NtUserSetImeHotKey();
         int16_t handle_NtUserVkKeyScanEx();
         BOOL handle_NtUserSetLayeredWindowAttributes();
@@ -829,6 +830,7 @@ namespace sogen
         uint32_t handle_NtGdiGetCharSet(const syscall_context& c, hdc dc);
         int32_t handle_NtGdiExtSelectClipRgn(const syscall_context& c, hdc dc, uint64_t region, LONG mode);
         BOOL handle_NtGdiLineTo(const syscall_context& c, hdc dc, LONG x_end, LONG y_end);
+        BOOL handle_NtGdiPolyPolyDraw();
         BOOL handle_NtGdiRectangle(const syscall_context& c, hdc dc, LONG left, LONG top, LONG right, LONG bottom);
         BOOL handle_NtGdiPatBlt(const syscall_context& c, hdc dc, LONG x, LONG y, LONG width, LONG height, DWORD rop);
         COLORREF handle_NtGdiSetPixel(const syscall_context& c, hdc dc, int x, int y, COLORREF color);
@@ -1435,6 +1437,7 @@ namespace sogen
         add_handler(NtGdiGetCharSet);
         add_handler(NtGdiExtSelectClipRgn);
         add_handler(NtGdiLineTo);
+        add_handler(NtGdiPolyPolyDraw);
         add_handler(NtGdiRectangle);
         add_handler(NtGdiPatBlt);
         add_handler(NtGdiBitBlt);
@@ -1818,6 +1821,7 @@ namespace sogen
         add_handler(NtUserGetPointerDevices);
         add_handler(NtUserHwndQueryRedirectionInfo);
         add_handler(NtUserEnableNonClientDpiScaling);
+        add_handler(NtUserIsChildWindowDpiMessageEnabled);
         add_handler(NtUserSetImeHotKey);
         add_handler(NtUserVkKeyScanEx);
         add_handler(NtUserSetLayeredWindowAttributes);

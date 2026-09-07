@@ -3769,6 +3769,12 @@ namespace sogen
             return TRUE;
         }
 
+        BOOL handle_NtGdiPolyPolyDraw()
+        {
+            // Path geometry is not modeled yet; accept the draw request so callers can continue.
+            return TRUE;
+        }
+
         BOOL handle_NtGdiRectangle(const syscall_context& c, const hdc dc, const LONG left, const LONG top, const LONG right,
                                    const LONG bottom)
         {

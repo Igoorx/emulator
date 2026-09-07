@@ -6975,6 +6975,11 @@ namespace sogen
             return TRUE;
         }
 
+        BOOL handle_NtUserIsChildWindowDpiMessageEnabled()
+        {
+            return FALSE;
+        }
+
         BOOL handle_NtUserSetImeHotKey()
         {
             return TRUE;
