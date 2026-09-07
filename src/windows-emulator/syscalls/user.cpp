@@ -5761,6 +5761,11 @@ namespace sogen
             return handle.bits;
         }
 
+        BOOL handle_NtUserThunkedMenuInfo(const syscall_context& /*c*/, const hmenu /*menu*/, const emulator_pointer /*menu_info*/)
+        {
+            return TRUE;
+        }
+
         BOOL handle_NtUserThunkedMenuItemInfo(const syscall_context& c, const hmenu menu, const UINT position, const BOOL by_position,
                                               const BOOL insert, const emulator_object<EMU_MENUITEMINFO> item_info,
                                               const emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> item_text)

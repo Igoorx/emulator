@@ -673,6 +673,7 @@ namespace sogen
         BOOL handle_NtUserThunkedMenuItemInfo(const syscall_context& c, hmenu menu, UINT position, BOOL by_position, BOOL insert,
                                               emulator_object<EMU_MENUITEMINFO> item_info,
                                               emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> item_text);
+        BOOL handle_NtUserThunkedMenuInfo(const syscall_context& c, hmenu menu, emulator_pointer menu_info);
         hmenu handle_NtUserCreatePopupMenu(const syscall_context& c);
         BOOL handle_NtUserSetMenu(const syscall_context& c, hwnd hwnd, hmenu menu, BOOL redraw);
         BOOL handle_NtUserSetMenuDefaultItem(const syscall_context& c, hmenu menu, UINT item, UINT by_position);
@@ -1736,6 +1737,7 @@ namespace sogen
         add_handler(NtGdiGetDCObject);
         add_handler(NtUserCreateMenu);
         add_handler(NtUserThunkedMenuItemInfo);
+        add_handler(NtUserThunkedMenuInfo);
         add_handler(NtUserIsTouchWindow);
         add_handler(NtUserCreatePopupMenu);
         add_handler(NtUserSetMenu);
