@@ -549,8 +549,12 @@ namespace sogen
                                          emulator_object<EMU_WNDCLASSEX> wnd_class_ex, emulator_pointer menu_name, BOOL /*ansi*/);
         int handle_NtUserGetClassName(const syscall_context& c, hwnd win_hwnd, BOOL real,
                                       emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> class_name);
-        NTSTATUS handle_NtUserSetWindowsHookEx();
-        NTSTATUS handle_NtUserUnhookWindowsHookEx();
+        uint64_t handle_NtUserSetWindowsHookEx(const syscall_context& c, hinstance instance,
+                                               emulator_object<UNICODE_STRING<EmulatorTraits<Emu64>>> module, DWORD thread_id, int hook_id,
+                                               pointer proc, BOOL ansi);
+        BOOL handle_NtUserUnhookWindowsHookEx(const syscall_context& c, uint64_t hook);
+        lresult handle_NtUserCallNextHookEx(const syscall_context& c, int code, wparam w_param, lparam l_param, uint32_t hook_id);
+
         hwnd handle_NtUserCreateWindowEx(const syscall_context& c, DWORD ex_style, emulator_object<LARGE_STRING> class_name,
                                          emulator_object<LARGE_STRING> cls_version, emulator_object<LARGE_STRING> window_name, DWORD style,
                                          int x, int y, int width, int height, hwnd parent, hmenu menu, hinstance instance, pointer l_param,
@@ -1582,6 +1586,8 @@ namespace sogen
         add_handler(NtUserUnregisterClass);
         add_handler(NtUserSetWindowsHookEx);
         add_handler(NtUserUnhookWindowsHookEx);
+        add_handler(NtUserCallNextHookEx);
+
         add_handler(NtUserCreateWindowEx);
         add_handler(NtUserShowWindow);
         add_handler(NtUserMessageCall);
