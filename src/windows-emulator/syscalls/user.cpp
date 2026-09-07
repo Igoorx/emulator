@@ -46,6 +46,8 @@ namespace sogen
         constexpr uint32_t k_color_btnface = 15;
         constexpr auto k_user_timer_minimum = std::chrono::milliseconds{10};
         constexpr uint64_t k_hrgn_window = 1;
+        // user32 uses this fixed system atom for its private ComboLBox class.
+        constexpr uint16_t k_combo_lbox_system_atom = 0x8012;
 
         struct send_message_callback_info
         {
@@ -3004,6 +3006,10 @@ namespace sogen
 
             c.proc.classes.insert_or_assign(class_name_str, entry);
             c.proc.classes.insert_or_assign(make_atom_class_name(index), entry);
+            if (utils::string::equals_ignore_case(std::u16string_view{class_name_str}, std::u16string_view{u"ComboLBox"}))
+            {
+                c.proc.classes.insert_or_assign(make_atom_class_name(k_combo_lbox_system_atom), entry);
+            }
 
             return index;
         }
