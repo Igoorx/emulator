@@ -141,6 +141,8 @@ CALL :collect sechost.dll
 CALL :collect setupapi.dll
 CALL :collect shcore.dll
 CALL :collect shell32.dll
+CALL :collect_file "%WINDIR%\System32\en-US", shell32.dll.mui, %EMU_SYSDIR%\en-us
+CALL :collect_file "%WINDIR%\SysWOW64\en-US", shell32.dll.mui, %EMU_SYSDIR_WOW64%\en-us
 CALL :collect shlwapi.dll
 CALL :collect slwga.dll
 CALL :collect sppc.dll
