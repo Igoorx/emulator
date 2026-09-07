@@ -49,6 +49,8 @@ CALL :collect coloradapterclient.dll
 CALL :collect combase.dll
 CALL :collect comctl32.dll
 CALL :collect comdlg32.dll
+CALL :collect_file "%WINDIR%\System32\en-US", comdlg32.dll.mui, %EMU_SYSDIR%\en-us
+CALL :collect_file "%WINDIR%\SysWOW64\en-US", comdlg32.dll.mui, %EMU_SYSDIR_WOW64%\en-us
 CALL :collect coremessaging.dll
 CALL :collect crypt32.dll
 CALL :collect cryptbase.dll
@@ -90,6 +92,7 @@ CALL :collect kernel.appcore.dll
 CALL :collect kernel32.dll
 CALL :collect kernelbase.dll
 CALL :collect ktmw32.dll
+CALL :collect mfperfhelper.dll
 CALL :collect mfplat.dll
 CALL :collect mfreadwrite.dll
 CALL :collect mmdevapi.dll
@@ -171,6 +174,8 @@ CALL :collect wintrust.dll
 CALL :collect wintypes.dll
 CALL :collect wlanapi.dll
 CALL :collect wldap32.dll
+CALL :collect wmasf.dll
+CALL :collect wmvcore.dll
 CALL :collect wow64.dll
 CALL :collect wow64base.dll
 CALL :collect wow64con.dll
