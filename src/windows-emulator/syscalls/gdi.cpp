@@ -1837,6 +1837,11 @@ namespace sogen
             return dc ? 1 : 0;
         }
 
+        uint32_t handle_NtGdiSetBoundsRect(const syscall_context&, const hdc, const emulator_pointer, const uint32_t)
+        {
+            return 0;
+        }
+
         void draw_system_button_glyph(const syscall_context& c, const hdc dc, const int x, const int y, const uint32_t index)
         {
             constexpr uint32_t k_obi_radio_mask = 0x47;

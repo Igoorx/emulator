@@ -5223,6 +5223,11 @@ namespace sogen
             return TRUE;
         }
 
+        BOOL handle_NtUserRedrawFrame(const syscall_context&, const hwnd)
+        {
+            return TRUE;
+        }
+
         NTSTATUS handle_NtUserGetCPD()
         {
             return STATUS_SUCCESS;
@@ -6265,6 +6270,11 @@ namespace sogen
                 return FALSE;
             }
 
+            return TRUE;
+        }
+
+        BOOL handle_NtUserSetWindowPlacement(const syscall_context&, const hwnd, const emulator_pointer)
+        {
             return TRUE;
         }
 
