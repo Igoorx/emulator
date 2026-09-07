@@ -14,6 +14,7 @@ SET EMU_FILESYS=%EMU_ROOT%\filesys
 SET EMU_WINDIR=%EMU_FILESYS%\c\windows
 SET EMU_SYSDIR=%EMU_WINDIR%\system32
 SET EMU_SYSDIR_WOW64=%EMU_WINDIR%\syswow64
+SET EMU_SYSTEMRESOURCESDIR=%EMU_WINDIR%\systemresources
 SET EMU_CURSORDIR=%EMU_WINDIR%\cursors
 SET EMU_SORTDIR=%EMU_WINDIR%\globalization\sorting
 SET EMU_WINSXSDIR=%EMU_WINDIR%\winsxs
@@ -26,6 +27,7 @@ MKDIR %EMU_SYSDIR_WOW64%
 MKDIR %EMU_CURSORDIR%
 MKDIR %EMU_SYSDIR%\en-us
 MKDIR %EMU_SYSDIR_WOW64%\en-us
+MKDIR %EMU_SYSTEMRESOURCESDIR%
 MKDIR %EMU_SORTDIR%
 MKDIR %EMU_WINSXSDIR%
 MKDIR %EMU_WINSXSMANIFESTDIR%
@@ -130,6 +132,7 @@ CALL :collect pdh.dll
 CALL :collect powrprof.dll
 CALL :collect profapi.dll
 CALL :collect propsys.dll
+CALL :collect_file "%WINDIR%\SystemResources", PROPSYS.dll.mun, %EMU_SYSTEMRESOURCESDIR%
 CALL :collect psapi.dll
 CALL :collect rasadhlp.dll
 CALL :collect resampledmo.dll
