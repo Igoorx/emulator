@@ -97,6 +97,8 @@ namespace sogen
             BOOL ansi{};
         };
 
+        static_assert(sizeof(fn_hk_in_lp_cbt_create_struct_message) == 0xA8);
+
         static_assert(offsetof(fn_hk_in_lp_cbt_create_struct_message, cs) == 0x40);
         static_assert(offsetof(fn_hk_in_lp_cbt_create_struct_message, hwndInsertAfter) == 0x90);
         static_assert(offsetof(fn_hk_in_lp_cbt_create_struct_message, xpfnProc) == 0x98);
@@ -1053,7 +1055,7 @@ namespace sogen
         void dispatch_cbt_create_window(const syscall_context& c, window_create_state&& state, const window& win, const user_cbt_hook& hook)
         {
             fn_hk_in_lp_cbt_create_struct_message args{};
-            args.pwnd = win.handle;
+            args.pwnd = win.guest.value();
             args.msg = static_cast<UINT>(k_hcbt_createwnd | (k_wh_cbt << 16));
             args.wParam = win.handle;
             args.hwndInsertAfter = 0;
@@ -3139,7 +3141,7 @@ namespace sogen
             return TRUE;
         }
 
-        lresult handle_NtUserCallNextHookEx(const syscall_context&, const int, const wparam, const lparam, const uint32_t)
+        lresult handle_NtUserCallNextHookEx(const syscall_context&, const int, const wparam, const lparam, const BOOL)
         {
             return 0;
         }
@@ -3551,16 +3553,6 @@ namespace sogen
 
             if (s.phase == window_create_phase::cbt_create)
             {
-                const auto hook_result = c.get_callback_result<lresult>();
-                if (hook_result != 0)
-                {
-                    release_window_create_allocations();
-                    c.win_emu.ui().destroy_window(win->handle);
-                    c.proc.gdi_window_surfaces.erase(static_cast<uint32_t>(win->handle));
-                    (void)c.proc.windows.erase(s.handle);
-                    return 0;
-                }
-
                 s.phase = window_create_phase::creation_messages;
                 dispatch_next_message(c, callback_id::NtUserCreateWindowEx, std::move(s), *win, s.message_queue);
                 return {};
