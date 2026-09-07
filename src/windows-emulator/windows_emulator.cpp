@@ -1768,6 +1768,10 @@ namespace sogen
         buffer.register_factory<window>([this] {
             return window{this->emu()}; //
         });
+
+        buffer.register_factory<accelerator_table>([this] {
+            return accelerator_table{this->emu()}; //
+        });
     }
 
     void windows_emulator::serialize(utils::buffer_serializer& buffer) const
