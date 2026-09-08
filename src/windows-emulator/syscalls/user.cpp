@@ -1675,6 +1675,7 @@ namespace sogen
                                           emulator_pointer bits);
         hdc create_gdi_window_dc(const syscall_context& c, hwnd window);
         uint32_t handle_NtGdiDeleteObjectApp(const syscall_context& c, uint32_t handle_value);
+        bool set_gdi_region_rect(const syscall_context& c, handle region, const RECT& rect);
         BOOL handle_NtGdiFlush(const syscall_context& c);
         BOOL handle_NtGdiPatBlt(const syscall_context& c, hdc dc, LONG x, LONG y, LONG width, LONG height, DWORD rop);
         uint64_t handle_NtGdiSelectBrushLocal(const syscall_context& c, hdc dc, uint32_t brush, emulator_pointer old_brush_ptr);
@@ -4281,6 +4282,17 @@ namespace sogen
             return win->update_pending ? TRUE : FALSE;
         }
 
+        int32_t handle_NtUserGetUpdateRgn(const syscall_context& c, const hwnd hwnd, const handle region, const BOOL /*erase*/)
+        {
+            const auto* win = c.proc.windows.get(hwnd);
+            if (!win || !set_gdi_region_rect(c, region, win->update_pending ? win->update_rect : RECT{}))
+            {
+                return 0;
+            }
+
+            return win->update_pending ? 2 : 1;
+        }
+
         void collect_pending_paint_tree(const syscall_context& c, window& win, std::vector<uint64_t>& order)
         {
             if (!c.proc.is_window_effectively_visible(win.handle))
@@ -6309,6 +6321,11 @@ namespace sogen
         BOOL handle_NtUserIsTouchWindow()
         {
             return FALSE;
+        }
+
+        uint64_t handle_NtUserGetTopLevelWindow(const syscall_context& c, const hwnd window)
+        {
+            return handle_NtUserGetAncestor(c, window, 2);
         }
 
         BOOL handle_NtUserGetWindowPlacement(const syscall_context& c, const hwnd window_handle, const emulator_pointer placement_address)

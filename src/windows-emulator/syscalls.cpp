@@ -595,6 +595,7 @@ namespace sogen
         int32_t handle_NtUserScrollWindowEx();
         BOOL handle_NtUserValidateRect(const syscall_context& c, hwnd hwnd, emulator_object<RECT> rect);
         BOOL handle_NtUserGetUpdateRect(const syscall_context& c, hwnd hwnd, emulator_object<RECT> rect, BOOL erase);
+        int32_t handle_NtUserGetUpdateRgn(const syscall_context& c, hwnd hwnd, handle region, BOOL erase);
         BOOL handle_NtUserUpdateWindow(const syscall_context& c, hwnd hwnd);
         BOOL completion_NtUserUpdateWindow(const syscall_context& c, hwnd hwnd);
         int32_t handle_NtUserGetKeyNameText(const syscall_context& c, int32_t l_param, emulator_pointer buffer, int32_t character_count);
@@ -703,6 +704,8 @@ namespace sogen
         int handle_NtUserSetScrollInfo();
         BOOL handle_NtUserShowScrollBar();
         BOOL handle_NtUserIsTouchWindow();
+        BOOL handle_NtUserIsTopLevelWindow(const syscall_context& c, hwnd window);
+        uint64_t handle_NtUserGetTopLevelWindow(const syscall_context& c, hwnd window);
         BOOL handle_NtUserGetWindowPlacement(const syscall_context& c, hwnd window_handle, emulator_pointer placement_address);
         BOOL handle_NtUserSetWindowPlacement(const syscall_context& c, hwnd window_handle, emulator_pointer placement_address);
         BOOL handle_NtUserTrackMouseEvent();
@@ -821,6 +824,7 @@ namespace sogen
         BOOL handle_NtGdiTransparentBlt(const syscall_context& c, hdc dst_dc, int x_dst, int y_dst, int dst_width, int dst_height,
                                         hdc src_dc, int x_src, int y_src, int src_width, int src_height, COLORREF transparent_color);
         uint64_t handle_NtGdiCreateRectRgn(const syscall_context& c, LONG x_left, LONG y_top, LONG x_right, LONG y_bottom);
+        BOOL handle_NtGdiEqualRgn(const syscall_context& c, handle first_region, handle second_region);
         int32_t handle_NtGdiGetRandomRgn(const syscall_context& c, hdc dc, uint64_t region, LONG index);
         uint32_t handle_NtGdiGetRegionData(const syscall_context& c, handle hrgn, ULONG buffer_size, emulator_pointer region_data);
         int32_t handle_NtGdiGetAppClipBox(const syscall_context& c, hdc dc, emulator_object<RECT> rect);
@@ -1050,6 +1054,16 @@ namespace sogen
         NTSTATUS handle_NtUserSystemParametersInfo()
         {
             return STATUS_NOT_SUPPORTED;
+        }
+
+        BOOL handle_NtUserSystemParametersInfoForDpi()
+        {
+            return TRUE;
+        }
+
+        BOOL handle_NtUserIsWindowBroadcastingDpiToChildren()
+        {
+            return FALSE;
         }
 
         NTSTATUS handle_NtUpdateWnfStateData()
@@ -1428,6 +1442,7 @@ namespace sogen
         add_handler(NtGdiGetGlyphIndicesW);
         add_handler(NtGdiGetGlyphOutline);
         add_handler(NtGdiCreateRectRgn);
+        add_handler(NtGdiEqualRgn);
         add_handler(NtGdiGetRandomRgn);
         add_handler(NtGdiGetRegionData);
         add_handler(NtGdiGetAppClipBox);
@@ -1515,6 +1530,8 @@ namespace sogen
         add_handler(NtQueryDirectoryFileEx);
         add_handler(NtQueryDirectoryFile);
         add_handler(NtUserSystemParametersInfo);
+        add_handler(NtUserSystemParametersInfoForDpi);
+        add_handler(NtUserIsWindowBroadcastingDpiToChildren);
         add_handler(NtGetContextThread);
         add_handler(NtYieldExecution);
         add_handler(NtUserModifyUserStartupInfoFlags);
@@ -1616,6 +1633,7 @@ namespace sogen
         add_handler(NtUserScrollWindowEx);
         add_handler(NtUserValidateRect);
         add_handler(NtUserGetUpdateRect);
+        add_handler(NtUserGetUpdateRgn);
         add_handler(NtUserUpdateWindow);
         add_handler(NtUserGetCursorInfo);
         add_handler(NtUserMapVirtualKeyEx);
@@ -1762,6 +1780,8 @@ namespace sogen
         add_handler(NtUserThunkedMenuItemInfo);
         add_handler(NtUserThunkedMenuInfo);
         add_handler(NtUserIsTouchWindow);
+        add_handler(NtUserIsTopLevelWindow);
+        add_handler(NtUserGetTopLevelWindow);
         add_handler(NtUserCreatePopupMenu);
         add_handler(NtUserSetMenu);
         add_handler(NtUserSetMenuDefaultItem);

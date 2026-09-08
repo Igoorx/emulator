@@ -1780,6 +1780,18 @@ namespace sogen
             }
         }
 
+        bool set_gdi_region_rect(const syscall_context& c, const handle region, const RECT& rect)
+        {
+            uint64_t region_attr = 0;
+            if (!get_gdi_object_address(c, static_cast<uint32_t>(region.bits), k_gdi_region_type, region_attr))
+            {
+                return false;
+            }
+
+            c.emu.write_memory(region_attr, &rect, sizeof(rect));
+            return true;
+        }
+
         // Returns the surface a paint DC should be presented to, and (via present_handle) the host window handle it
         // belongs to (the top-level window for child controls). Used by NtUserEndPaint to flush guest paint output.
         gdi_bitmap_surface* get_dc_present_surface(const syscall_context& c, const hdc dc, uint32_t& present_handle)
@@ -3568,10 +3580,46 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        uint64_t handle_NtGdiCreateRectRgn(const syscall_context& c, const LONG /*x_left*/, const LONG /*y_top*/, const LONG /*x_right*/,
-                                           const LONG /*y_bottom*/)
+        uint64_t handle_NtGdiCreateRectRgn(const syscall_context& c, const LONG x_left, const LONG y_top, const LONG x_right,
+                                           const LONG y_bottom)
         {
-            return allocate_gdi_object(c, k_gdi_region_type, k_gdi_region_attr_size);
+            const auto handle = allocate_gdi_object(c, k_gdi_region_type, k_gdi_region_attr_size);
+            uint64_t region_attr = 0;
+            if (handle != 0 && get_gdi_object_address(c, handle, k_gdi_region_type, region_attr))
+            {
+                const RECT rect{
+                    .left = x_left,
+                    .top = y_top,
+                    .right = x_right,
+                    .bottom = y_bottom,
+                };
+                c.emu.write_memory(region_attr, &rect, sizeof(rect));
+            }
+            return handle;
+        }
+
+        BOOL handle_NtGdiEqualRgn(const syscall_context& c, const handle first_region, const handle second_region)
+        {
+            uint64_t first_attr = 0;
+            uint64_t second_attr = 0;
+            if (!get_gdi_object_address(c, static_cast<uint32_t>(first_region.bits), k_gdi_region_type, first_attr) ||
+                !get_gdi_object_address(c, static_cast<uint32_t>(second_region.bits), k_gdi_region_type, second_attr))
+            {
+                return FALSE;
+            }
+
+            RECT first_rect{};
+            RECT second_rect{};
+            if (!c.win_emu.memory.try_read_memory(first_attr, &first_rect, sizeof(first_rect)) ||
+                !c.win_emu.memory.try_read_memory(second_attr, &second_rect, sizeof(second_rect)))
+            {
+                return FALSE;
+            }
+
+            return first_rect.left == second_rect.left && first_rect.top == second_rect.top && first_rect.right == second_rect.right &&
+                           first_rect.bottom == second_rect.bottom
+                       ? TRUE
+                       : FALSE;
         }
 
         int32_t handle_NtGdiGetRandomRgn(const syscall_context&, const hdc dc, const uint64_t region, const LONG /*index*/)
