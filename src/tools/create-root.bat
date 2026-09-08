@@ -190,6 +190,7 @@ CALL :collect ws2_32.dll
 CALL :collect wshbth.dll
 CALL :collect wsock32.dll
 CALL :collect wtsapi32.dll
+CALL :collect xmllite.dll
 CALL :collect x3daudio1_7.dll
 CALL :collect xapofx1_5.dll
 CALL :collect xaudio2_9.dll
