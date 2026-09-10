@@ -116,6 +116,23 @@ namespace sogen
         NTSTATUS Status;
     };
 
+    struct AFD_INFO
+    {
+        ULONG InformationClass;
+
+        alignas(8) union
+        {
+            ULONG Ulong;
+            LARGE_INTEGER LargeInteger;
+            BOOLEAN Boolean;
+        } Information;
+    };
+
+    static_assert(offsetof(AFD_INFO, Information) == 8);
+    static_assert(sizeof(AFD_INFO) == 16);
+
+#define AFD_INFO_BLOCKING_MODE 0x02L
+
     template <typename Traits>
     struct AFD_POLL_INFO
     {

@@ -397,6 +397,15 @@ namespace sogen
                 this->setup(win_emu.socket_factory());
             }
 
+            void set_socket(std::unique_ptr<network::i_socket> socket)
+            {
+                this->s_ = std::move(socket);
+                if (this->s_)
+                {
+                    this->s_->set_blocking(false);
+                }
+            }
+
             void setup(network::socket_factory& factory)
             {
                 if (!this->creation_data)
@@ -410,13 +419,11 @@ namespace sogen
                 const auto type = translate_win_to_host_type(data.type);
                 const auto protocol = translate_win_to_host_protocol(data.protocol);
 
-                this->s_ = factory.create_socket(af, type, protocol);
+                this->set_socket(factory.create_socket(af, type, protocol));
                 if (!this->s_)
                 {
                     throw std::runtime_error("Failed to create socket!");
                 }
-
-                this->s_->set_blocking(false);
             }
 
             void delay_ioctrl(const io_device_context& c, const std::optional<bool> require_poll = {},
@@ -455,6 +462,22 @@ namespace sogen
 
                 const auto option_flags = win_emu.emu().read_memory<ULONG>(c.input_buffer + option_flags_offset);
                 this->non_blocking_ = (option_flags & non_blocking_flag) != 0;
+            }
+
+            NTSTATUS ioctl_set_information(windows_emulator& win_emu, const io_device_context& c)
+            {
+                if (c.input_buffer_length < sizeof(AFD_INFO))
+                {
+                    return STATUS_BUFFER_TOO_SMALL;
+                }
+
+                const auto info = win_emu.emu().read_memory<AFD_INFO>(c.input_buffer);
+                if (info.InformationClass == AFD_INFO_BLOCKING_MODE)
+                {
+                    this->non_blocking_ = info.Information.Boolean != FALSE;
+                }
+
+                return STATUS_SUCCESS;
             }
 
             NTSTATUS ioctl_get_context(windows_emulator& win_emu, const io_device_context& c) const
@@ -642,8 +665,9 @@ namespace sogen
                 case AFD_SET_CONTEXT:
                     this->update_shared_info(win_emu, c);
                     return STATUS_SUCCESS;
-                case AFD_GET_INFORMATION:
                 case AFD_SET_INFORMATION:
+                    return this->ioctl_set_information(win_emu, c);
+                case AFD_GET_INFORMATION:
                 case AFD_QUERY_HANDLES:
                 case AFD_TRANSPORT_IOCTL:
                 case AFD_PARTIAL_DISCONNECT:
@@ -833,7 +857,7 @@ namespace sogen
                     return STATUS_INVALID_HANDLE;
                 }
 
-                target_endpoint->s_ = std::move(accepted_socket);
+                target_endpoint->set_socket(std::move(accepted_socket));
 
                 pending_connections_.erase(it);
 
