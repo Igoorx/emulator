@@ -2,6 +2,7 @@
 #include "emulator_thread.hpp"
 
 #include "cpu_context.hpp"
+#include "devices/console.hpp"
 #include "process_context.hpp"
 #include "io_completion_wait.hpp"
 #include "syscall_utils.hpp"
@@ -102,8 +103,11 @@ namespace sogen
             }
 
             case handle_types::file: {
-                // File I/O is synchronous in the emulator, so no operation is ever in flight when a
-                // wait is issued -- the file object's built-in event stays signaled.
+                if (h == STDIN_HANDLE)
+                {
+                    return is_console_input_available() ? wait_state::signaled : wait_state::not_signaled;
+                }
+
                 if (h.value.is_pseudo || c.files.get(h))
                 {
                     return wait_state::signaled;

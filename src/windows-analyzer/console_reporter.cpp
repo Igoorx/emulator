@@ -43,6 +43,7 @@ namespace sogen
                                },
                                [&](const stdout_chunk_event& e) {
                                    (void)fwrite(e.data.data(), 1, e.data.size(), stdout); //
+                                   fflush(stdout);
                                },
                                [&](const auto&) {
                                    // Ignore all other events in silent mode.
