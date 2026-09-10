@@ -2,7 +2,6 @@
 #include "emulator_thread.hpp"
 
 #include "cpu_context.hpp"
-#include "devices/console.hpp"
 #include "process_context.hpp"
 #include "io_completion_wait.hpp"
 #include "syscall_utils.hpp"
@@ -70,8 +69,9 @@ namespace sogen
             }
         }
 
-        wait_state observe_object_signal(process_context& c, const handle h, const uint32_t current_thread_id)
+        wait_state observe_object_signal(windows_emulator& win_emu, const handle h, const uint32_t current_thread_id)
         {
+            auto& c = win_emu.process;
             const auto type = h.value.type;
 
             switch (type)
@@ -105,7 +105,7 @@ namespace sogen
             case handle_types::file: {
                 if (h == STDIN_HANDLE)
                 {
-                    return is_console_input_available() ? wait_state::signaled : wait_state::not_signaled;
+                    return win_emu.console().input_available() ? wait_state::signaled : wait_state::not_signaled;
                 }
 
                 if (h.value.is_pseudo || c.files.get(h))
@@ -1070,7 +1070,7 @@ namespace sogen
                 {
                     const auto& obj = this->await_objects[i];
 
-                    const auto state = observe_object_signal(process, obj, this->id);
+                    const auto state = observe_object_signal(win_emu, obj, this->id);
                     const auto signaled = state != wait_state::not_signaled;
                     all_signaled &= signaled;
 

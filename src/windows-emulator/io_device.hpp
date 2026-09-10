@@ -19,6 +19,7 @@ namespace sogen
 
     struct io_device_context
     {
+        handle source_handle{};
         handle event{};
         emulator_pointer /*PIO_APC_ROUTINE*/ apc_routine{};
         emulator_pointer apc_context{};
@@ -48,6 +49,7 @@ namespace sogen
 
         void serialize(utils::buffer_serializer& buffer) const
         {
+            buffer.write(source_handle);
             buffer.write(event);
             buffer.write(apc_routine);
             buffer.write(apc_context);
@@ -61,6 +63,7 @@ namespace sogen
 
         void deserialize(utils::buffer_deserializer& buffer)
         {
+            buffer.read(source_handle);
             buffer.read(event);
             buffer.read(apc_routine);
             buffer.read(apc_context);

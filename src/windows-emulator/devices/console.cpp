@@ -2,12 +2,7 @@
 #include "console.hpp"
 
 #include "../windows_emulator.hpp"
-#include <iostream>
-
-#ifndef _WIN32
-#include <poll.h>
-#include <unistd.h>
-#endif
+#include <platform/console_backend.hpp>
 
 namespace sogen
 {
@@ -33,20 +28,6 @@ namespace sogen
 
         constexpr uint32_t default_input_mode = 0x007F;
         constexpr uint32_t default_output_mode = 0x0003;
-
-        bool is_host_input_available()
-        {
-            if (std::cin.rdbuf()->in_avail() > 0)
-            {
-                return true;
-            }
-#ifdef _WIN32
-            return false;
-#else
-            pollfd descriptor{STDIN_FILENO, POLLIN, 0};
-            return poll(&descriptor, 1, 0) > 0 && (descriptor.revents & (POLLIN | POLLHUP)) != 0;
-#endif
-        }
 
         enum class fill_console_output_type : uint32_t
         {
@@ -157,11 +138,108 @@ namespace sogen
             uint32_t data_size;
         };
 
-    }
+        void set_console_key(console_input_record& record, const uint16_t virtual_key, const uint16_t scan_code,
+                             const bool enhanced = false)
+        {
+            record.virtual_key_code = virtual_key;
+            record.virtual_scan_code = scan_code;
+            if (enhanced)
+            {
+                record.control_key_state |= 0x0100;
+            }
+        }
 
-    bool is_console_input_available()
-    {
-        return is_host_input_available();
+        console_input_record make_console_input_record(const console_key_event& event)
+        {
+            console_input_record record{};
+            record.event_type = 1;
+            record.key_down = 1;
+            record.repeat_count = 1;
+            record.unicode_character = event.character;
+
+            switch (event.key)
+            {
+            case console_key::character:
+                if (event.control && event.character > 0 && event.character <= 0x1A)
+                {
+                    record.virtual_key_code = static_cast<uint16_t>('A' + event.character - 1);
+                    record.control_key_state = 0x0008;
+                }
+                else if (event.character >= 'a' && event.character <= 'z')
+                {
+                    record.virtual_key_code = static_cast<uint16_t>('A' + event.character - 'a');
+                }
+                else
+                {
+                    record.virtual_key_code = event.character;
+                }
+                break;
+            case console_key::escape:
+                set_console_key(record, VK_ESCAPE, 0x01);
+                break;
+            case console_key::enter:
+                set_console_key(record, VK_RETURN, 0x1C);
+                break;
+            case console_key::tab:
+                set_console_key(record, VK_TAB, 0x0F);
+                break;
+            case console_key::backspace:
+                set_console_key(record, VK_BACK, 0x0E);
+                break;
+            case console_key::up:
+                set_console_key(record, VK_UP, 0x48, true);
+                break;
+            case console_key::down:
+                set_console_key(record, VK_DOWN, 0x50, true);
+                break;
+            case console_key::left:
+                set_console_key(record, VK_LEFT, 0x4B, true);
+                break;
+            case console_key::right:
+                set_console_key(record, VK_RIGHT, 0x4D, true);
+                break;
+            case console_key::home:
+                set_console_key(record, VK_HOME, 0x47, true);
+                break;
+            case console_key::end:
+                set_console_key(record, VK_END, 0x4F, true);
+                break;
+            case console_key::insert:
+                set_console_key(record, VK_INSERT, 0x52, true);
+                break;
+            case console_key::delete_key:
+                set_console_key(record, VK_DELETE, 0x53, true);
+                break;
+            case console_key::page_up:
+                set_console_key(record, VK_PRIOR, 0x49, true);
+                break;
+            case console_key::page_down:
+                set_console_key(record, VK_NEXT, 0x51, true);
+                break;
+            }
+
+            return record;
+        }
+
+        handle effective_console_endpoint(const io_device_context& context, const uint64_t target_handle)
+        {
+            return target_handle == 0 ? context.source_handle : make_handle(target_handle);
+        }
+
+        bool is_input_endpoint(const handle endpoint)
+        {
+            return endpoint == STDIN_HANDLE;
+        }
+
+        console_input_mode make_console_input_mode(const uint32_t mode)
+        {
+            return {
+                .processed = (mode & 0x0001) != 0,
+                .line = (mode & 0x0002) != 0,
+                .echo = (mode & 0x0004) != 0,
+            };
+        }
+
     }
 
     namespace
@@ -203,6 +281,7 @@ namespace sogen
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
+                const auto endpoint = effective_console_endpoint(context, header.target_handle);
 
                 if (header.message_buffer_size != sizeof(console_message_header) + header.data_size ||
                     header.data != header.message + sizeof(console_message_header) || !header.message || !header.data)
@@ -224,7 +303,7 @@ namespace sogen
                         return STATUS_INVALID_PARAMETER;
                     }
 
-                    const auto mode = header.target_handle == STDIN_HANDLE.h ? input_mode_ : output_mode_;
+                    const auto mode = is_input_endpoint(endpoint) ? input_mode_ : output_mode_;
                     win_emu.emu().write_memory(header.data, &mode, sizeof(mode));
                     return STATUS_SUCCESS;
                 }
@@ -237,9 +316,10 @@ namespace sogen
 
                     uint32_t mode{};
                     win_emu.emu().read_memory(header.data, &mode, sizeof(mode));
-                    if (header.target_handle == STDIN_HANDLE.h)
+                    if (is_input_endpoint(endpoint))
                     {
                         input_mode_ = mode;
+                        win_emu.console().set_input_mode(make_console_input_mode(mode));
                     }
                     else
                     {
@@ -270,21 +350,19 @@ namespace sogen
                 }
 
                 case console_api::get_console_input_event_count: {
-                    if (header.target_handle != STDIN_HANDLE.h || header.input_count != 1 || header.output_count != 1 ||
+                    if (!is_input_endpoint(endpoint) || header.input_count != 1 || header.output_count != 1 ||
                         message.data_size != sizeof(uint32_t))
                     {
                         return STATUS_INVALID_PARAMETER;
                     }
 
-                    const uint32_t event_count = is_host_input_available() ? 1 : 0;
+                    const uint32_t event_count = win_emu.console().input_available() ? 1 : 0;
                     win_emu.emu().write_memory(header.data, &event_count, sizeof(event_count));
                     return STATUS_SUCCESS;
                 }
-
                 case console_api::read_console_input: {
-                    if ((header.target_handle != STDIN_HANDLE.h && header.target_handle != 0) ||
-                        context.input_buffer_length < sizeof(console_ioctl_input_header) || header.input_count != 1 ||
-                        header.output_count != 2 || message.data_size != sizeof(read_console_input_request))
+                    if (!is_input_endpoint(endpoint) || context.input_buffer_length < sizeof(console_ioctl_input_header) ||
+                        header.input_count != 1 || header.output_count != 2 || message.data_size != sizeof(read_console_input_request))
                     {
                         return STATUS_INVALID_PARAMETER;
                     }
@@ -296,59 +374,13 @@ namespace sogen
                         return STATUS_INVALID_PARAMETER;
                     }
 
-                    const auto character = std::cin.get();
-                    if (character == std::char_traits<char>::eof())
+                    const auto event = win_emu.console().read_input_event();
+                    if (!event)
                     {
                         return STATUS_END_OF_FILE;
                     }
 
-                    constexpr uint16_t key_event = 1;
-                    constexpr uint32_t left_ctrl_pressed = 0x0008;
-
-                    console_input_record record{};
-                    record.event_type = key_event;
-                    record.key_down = 1;
-                    record.repeat_count = 1;
-                    record.unicode_character = static_cast<char16_t>(static_cast<uint8_t>(character));
-
-                    switch (character)
-                    {
-                    case '\n':
-                    case '\r':
-                        record.virtual_key_code = VK_RETURN;
-                        record.virtual_scan_code = 0x1C;
-                        record.unicode_character = u'\r';
-                        break;
-                    case '\t':
-                        record.virtual_key_code = VK_TAB;
-                        record.virtual_scan_code = 0x0F;
-                        break;
-                    case '\b':
-                    case 0x7F:
-                        record.virtual_key_code = VK_BACK;
-                        record.virtual_scan_code = 0x0E;
-                        record.unicode_character = u'\b';
-                        break;
-                    case 0x1B:
-                        record.virtual_key_code = VK_ESCAPE;
-                        record.virtual_scan_code = 0x01;
-                        break;
-                    default:
-                        if (character > 0 && character <= 0x1A)
-                        {
-                            record.virtual_key_code = static_cast<uint16_t>('A' + character - 1);
-                            record.control_key_state = left_ctrl_pressed;
-                        }
-                        else if (character >= 'a' && character <= 'z')
-                        {
-                            record.virtual_key_code = static_cast<uint16_t>('A' + character - 'a');
-                        }
-                        else
-                        {
-                            record.virtual_key_code = static_cast<uint16_t>(static_cast<uint8_t>(character));
-                        }
-                        break;
-                    }
+                    const auto record = make_console_input_record(*event);
 
                     auto request = win_emu.emu().read_memory<read_console_input_request>(header.data);
                     request.events_read = 1;
@@ -357,9 +389,8 @@ namespace sogen
                     return STATUS_SUCCESS;
                 }
                 case console_api::write_console: {
-                    if ((header.target_handle != STDOUT_HANDLE.h && header.target_handle != 0) ||
-                        context.input_buffer_length < sizeof(console_ioctl_input_header) || header.input_count != 2 ||
-                        header.output_count != 1 || message.data_size != sizeof(write_console_request))
+                    if (is_input_endpoint(endpoint) || context.input_buffer_length < sizeof(console_ioctl_input_header) ||
+                        header.input_count != 2 || header.output_count != 1 || message.data_size != sizeof(write_console_request))
                     {
                         return STATUS_INVALID_PARAMETER;
                     }
@@ -392,7 +423,7 @@ namespace sogen
                 }
 
                 case console_api::fill_console_output: {
-                    if (message.data_size != sizeof(fill_console_output_request))
+                    if (is_input_endpoint(endpoint) || message.data_size != sizeof(fill_console_output_request))
                     {
                         return STATUS_INVALID_PARAMETER;
                     }
@@ -413,7 +444,7 @@ namespace sogen
                 }
 
                 case console_api::set_console_cursor_position:
-                    if (message.data_size != sizeof(cursor_position_))
+                    if (is_input_endpoint(endpoint) || message.data_size != sizeof(cursor_position_))
                     {
                         return STATUS_INVALID_PARAMETER;
                     }
@@ -422,7 +453,7 @@ namespace sogen
                     return STATUS_SUCCESS;
 
                 case console_api::set_console_text_attribute: {
-                    if (message.data_size != sizeof(text_attributes_))
+                    if (is_input_endpoint(endpoint) || message.data_size != sizeof(text_attributes_))
                     {
                         return STATUS_INVALID_PARAMETER;
                     }
@@ -432,7 +463,7 @@ namespace sogen
                 }
 
                 case console_api::get_console_screen_buffer_info: {
-                    if (message.data_size != sizeof(console_screen_buffer_info_response))
+                    if (is_input_endpoint(endpoint) || message.data_size != sizeof(console_screen_buffer_info_response))
                     {
                         return STATUS_INVALID_PARAMETER;
                     }
