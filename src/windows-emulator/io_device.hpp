@@ -24,6 +24,7 @@ namespace sogen
         emulator_pointer /*PIO_APC_ROUTINE*/ apc_routine{};
         emulator_pointer apc_context{};
         emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block;
+        emulator_pointer wow64_x86_io_status_block{};
         ULONG io_control_code{};
         emulator_pointer input_buffer{};
         ULONG input_buffer_length{};
@@ -54,6 +55,7 @@ namespace sogen
             buffer.write(apc_routine);
             buffer.write(apc_context);
             buffer.write(io_status_block);
+            buffer.write(wow64_x86_io_status_block);
             buffer.write(io_control_code);
             buffer.write(input_buffer);
             buffer.write(input_buffer_length);
@@ -68,6 +70,7 @@ namespace sogen
             buffer.read(apc_routine);
             buffer.read(apc_context);
             buffer.read(io_status_block);
+            buffer.read(wow64_x86_io_status_block);
             buffer.read(io_control_code);
             buffer.read(input_buffer);
             buffer.read(input_buffer_length);

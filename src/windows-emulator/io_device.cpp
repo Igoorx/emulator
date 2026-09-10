@@ -55,6 +55,21 @@ namespace sogen
             }
         };
 
+        void write_wow64_io_status(const io_device_context& context)
+        {
+            if (!context.wow64_x86_io_status_block || !context.io_status_block)
+            {
+                return;
+            }
+
+            const auto native_status = context.io_status_block.read();
+            const auto status32 = static_cast<uint32_t>(native_status.Status);
+            const auto information32 = static_cast<uint32_t>(native_status.Information);
+            auto* memory = context.io_status_block.get_memory_interface();
+            memory->write_memory(context.wow64_x86_io_status_block, &status32, sizeof(status32));
+            memory->write_memory(context.wow64_x86_io_status_block + sizeof(status32), &information32, sizeof(information32));
+        }
+
         // Factories for the devices defined locally in this file, matching the shared create_*
         // (device_creation_context) signature so they slot straight into the registry.
         std::unique_ptr<io_device> create_dummy_device(const device_creation_context&)
@@ -152,6 +167,7 @@ namespace sogen
 
         const auto result = this->io_control(win_emu, c);
         write_io_status(c.io_status_block, result);
+        write_wow64_io_status(c);
 
         // A synchronously-completing IOCTL must signal the optional completion event the caller passed, so a
         // thread that issues the request and then waits on the event is released. Asynchronous devices return
