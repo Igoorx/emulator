@@ -262,6 +262,11 @@ namespace sogen
                 buffer.read(output_mode_);
             }
 
+            void restore_after_state_restore(windows_emulator& win_emu) override
+            {
+                win_emu.console().set_input_mode(make_console_input_mode(input_mode_));
+            }
+
             NTSTATUS io_control(windows_emulator& win_emu, const io_device_context& context) override
             {
                 if (context.io_control_code != console_ioctl)

@@ -116,6 +116,11 @@ namespace sogen
             (void)data;
         }
 
+        virtual void restore_after_state_restore(windows_emulator& win_emu)
+        {
+            (void)win_emu;
+        }
+
         virtual void work(windows_emulator& win_emu)
         {
             (void)win_emu;
@@ -173,6 +178,7 @@ namespace sogen
         }
 
         void work(windows_emulator& win_emu) override;
+        void restore_after_state_restore(windows_emulator& win_emu) override;
         NTSTATUS io_control(windows_emulator& win_emu, const io_device_context& context) override;
 
         void serialize_object(utils::buffer_serializer& buffer) const override;
