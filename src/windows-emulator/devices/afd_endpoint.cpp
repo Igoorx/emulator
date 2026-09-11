@@ -610,6 +610,19 @@ namespace sogen
                         }
                     }
 
+                    const auto& completed_request = *this->delayed_ioctl_;
+                    if (completed_request.completion_port.bits)
+                    {
+                        if (auto* completion = win_emu.process.io_completions.get(completed_request.completion_port))
+                        {
+                            io_completion_message message{};
+                            message.key_context = completed_request.completion_key;
+                            message.apc_context = completed_request.apc_context;
+                            message.io_status_block = completed_request.io_status_block.read();
+                            completion->enqueue(message);
+                        }
+                    }
+
                     auto* e = win_emu.process.events.get(this->delayed_ioctl_->event);
                     if (e)
                     {
