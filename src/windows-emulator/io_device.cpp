@@ -1,5 +1,6 @@
 #include "std_include.hpp"
 #include "io_device.hpp"
+#include "io_completion_wait.hpp"
 #include "windows_emulator.hpp"
 #include "devices/afd_endpoint.hpp"
 #include "devices/mount_point_manager.hpp"
@@ -119,6 +120,7 @@ namespace sogen
             {u"NamedPipe"sv, create_named_pipe_device},
             {u"SogenGpu"sv, create_gpu_bridge},
             {u"SogenSteam"sv, create_steam_bridge},
+            {u"Afd\\Mio"sv, create_afd_mio},
             // AFD
             {u"Afd\\Endpoint"sv, create_afd_endpoint},
             {u"Afd\\AsyncConnectHlp"sv, create_afd_async_connect_hlp},
@@ -146,6 +148,62 @@ namespace sogen
         }
 
         return it->second(context);
+    }
+
+    NTSTATUS io_device_container::set_completion_association(process_context& process, const emulator_thread* active_thread,
+                                                             const handle completion_port, const uint64_t key)
+    {
+        const auto resolved_completion_port = process.resolve_object_pseudo_handle(completion_port, active_thread);
+        if (resolved_completion_port.value.type != handle_types::io_completion || !process.io_completions.get(resolved_completion_port))
+        {
+            return STATUS_INVALID_HANDLE;
+        }
+
+        handle retained_completion_port{};
+        if (!io_completion_wait::retain_handle_reference(process, active_thread, resolved_completion_port, retained_completion_port))
+        {
+            return STATUS_INVALID_HANDLE;
+        }
+
+        if (this->completion_association_)
+        {
+            io_completion_wait::release_handle_reference(process, this->completion_association_->completion_port);
+        }
+
+        this->completion_association_ = device_completion_association{
+            .completion_port = retained_completion_port,
+            .key = key,
+        };
+        return STATUS_SUCCESS;
+    }
+
+    void io_device_container::set_completion_notification_flags(const uint32_t flags)
+    {
+        this->completion_notification_flags_ = flags;
+    }
+
+    void io_device_container::release_references(process_context& process)
+    {
+        this->assert_validity();
+        this->device_->release_references(process);
+
+        if (this->completion_association_)
+        {
+            io_completion_wait::release_handle_reference(process, this->completion_association_->completion_port);
+            this->completion_association_ = {};
+        }
+    }
+
+    NTSTATUS io_device_container::io_control(windows_emulator& win_emu, const io_device_context& context)
+    {
+        this->assert_validity();
+        win_emu.callbacks.on_ioctrl(*this->device_, this->device_name_, context.io_control_code);
+
+        auto request = context;
+        request.completion_port = this->completion_association_ ? this->completion_association_->completion_port : handle{};
+        request.completion_key = this->completion_association_ ? this->completion_association_->key : 0;
+        request.completion_notification_flags = this->completion_notification_flags_;
+        return this->device_->io_control(win_emu, request);
     }
 
     emulator_thread& io_device_context::thread() const
@@ -183,13 +241,6 @@ namespace sogen
         return result;
     }
 
-    NTSTATUS io_device_container::io_control(windows_emulator& win_emu, const io_device_context& context)
-    {
-        this->assert_validity();
-        win_emu.callbacks.on_ioctrl(*this->device_, this->device_name_, context.io_control_code);
-        return this->device_->io_control(win_emu, context);
-    }
-
     void io_device_container::work(windows_emulator& win_emu)
     {
         this->assert_validity();
@@ -208,6 +259,8 @@ namespace sogen
 
         buffer.write(this->is_32_bit_);
         buffer.write_string(this->device_name_);
+        buffer.write_optional(this->completion_association_);
+        buffer.write(this->completion_notification_flags_);
         this->device_->serialize(buffer);
     }
 
@@ -215,6 +268,8 @@ namespace sogen
     {
         buffer.read(this->is_32_bit_);
         buffer.read_string(this->device_name_);
+        buffer.read_optional(this->completion_association_);
+        buffer.read(this->completion_notification_flags_);
 
         this->setup();
         this->device_->deserialize(buffer);
