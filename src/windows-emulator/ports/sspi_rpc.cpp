@@ -19,6 +19,12 @@ namespace sogen
                                                                        0x00, 0x53, 0x6f, 0x67, 0x65, 0x6e, 0x53, 0x73, 0x70, 0x69, 0x43,
                                                                        0x74, 0x78, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00};
         static_assert(k_sspi_connect_reply_body.size() == 32);
+        constexpr uint64_t k_sspi_credential_lower = 9;
+        constexpr uint64_t k_sspi_credential_upper = 0x104f0;
+        constexpr uint64_t k_sspi_credential_expiry = 0x7fffff36d5969fffULL;
+        constexpr std::array<uint8_t, 16> k_sspi_credential_handle = {
+            0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+        };
 
         std::string sspi_hex_dump(const uint8_t* data, const size_t length)
         {
@@ -64,8 +70,13 @@ namespace sogen
                     return handle_call_rpc(win_emu, c, writer);
 
                 case 4:
-                    return handle_acquire_credentials_diagnostic(win_emu, c);
+                    return handle_acquire_credentials(win_emu, c, writer);
 
+                case 5:
+                    return handle_free_credentials(win_emu, c, writer);
+
+                case 6:
+                    return handle_process_security_context_diagnostic(win_emu, c);
                 default:
                     return STATUS_NOT_SUPPORTED;
                 }
@@ -329,8 +340,26 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            NTSTATUS handle_acquire_credentials_diagnostic(windows_emulator& win_emu, const lpc_request_context& c)
+            NTSTATUS handle_acquire_credentials(windows_emulator& win_emu, const lpc_request_context& c,
+                                                utils::aligned_binary_writer& writer)
             {
+                if (writer.pointer_size() != utils::aligned_binary_writer::pointer_size_64)
+                {
+                    return STATUS_NOT_SUPPORTED;
+                }
+
+                if (!c.send_buffer || c.send_buffer_length < k_sspi_context_handle.size())
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                std::array<uint8_t, k_sspi_context_handle.size()> context_handle{};
+                win_emu.emu().read_memory(c.send_buffer, context_handle.data(), context_handle.size());
+                if (context_handle != k_sspi_context_handle)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
                 constexpr size_t max_sspi_rpc_dump = 0x1000;
                 const auto dump_length = std::min<size_t>(c.send_buffer_length, max_sspi_rpc_dump);
                 std::vector<uint8_t> request(dump_length);
@@ -348,6 +377,172 @@ namespace sogen
                     win_emu.log.print(color::gray, "SSPI_RPC procedure_4_body offset=" + std::to_string(offset) +
                                                        " data=" + sspi_hex_dump(request.data() + offset, chunk_length) + "\n");
                 }
+
+                if (writer.offset() != 0x18)
+                {
+                    win_emu.log.warn("[sspi-rpc] unexpected op4 RPC header size: 0x%llX\n",
+                                     static_cast<unsigned long long>(writer.offset()));
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                const auto procedure_start = writer.offset();
+                writer.write<uint64_t>(k_sspi_credential_lower);
+                writer.write<uint64_t>(k_sspi_credential_upper);
+                writer.write<uint64_t>(k_sspi_credential_expiry);
+                writer.write<uint32_t>(0);
+                writer.write_pointer_sized(0);
+                writer.write_pointer_sized(0);
+                writer.write<uint32_t>(0);
+                writer.write<uint32_t>(0);
+                writer.write_ndr_pointer(false);
+                writer.write<int8_t>(0);
+                writer.align_to(8);
+                writer.write<int32_t>(0);
+                writer.align_to(8);
+                writer.pad(0x50);
+
+                const auto procedure_size = writer.offset() - procedure_start;
+                if (procedure_size != 0xa0 || writer.offset() != 0xb8)
+                {
+                    win_emu.log.warn("[sspi-rpc] malformed AcquireCredentials reply: procedure=0x%llX payload=0x%llX\n",
+                                     static_cast<unsigned long long>(procedure_size), static_cast<unsigned long long>(writer.offset()));
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                win_emu.log.print(color::gray,
+                                  "[sspi-rpc] AcquireCredentials Windows-reference reply\n"
+                                  "credential_lower=0x%llx\n"
+                                  "credential_upper=0x%llx\n"
+                                  "expiry=0x%llx\n"
+                                  "callback_offset=0x18\n"
+                                  "procedure_return_offset=0x48\n"
+                                  "procedure_body_size=0xa0\n"
+                                  "rpc_payload_size=0xb8\n",
+                                  static_cast<unsigned long long>(k_sspi_credential_lower),
+                                  static_cast<unsigned long long>(k_sspi_credential_upper),
+                                  static_cast<unsigned long long>(k_sspi_credential_expiry));
+
+                return STATUS_SUCCESS;
+            }
+
+            NTSTATUS handle_free_credentials(windows_emulator& win_emu, const lpc_request_context& c, utils::aligned_binary_writer& writer)
+            {
+                if (writer.pointer_size() != utils::aligned_binary_writer::pointer_size_64)
+                {
+                    return STATUS_NOT_SUPPORTED;
+                }
+
+                if (!c.send_buffer || c.send_buffer_length < k_sspi_context_handle.size())
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                std::array<uint8_t, k_sspi_context_handle.size()> context_handle{};
+                win_emu.emu().read_memory(c.send_buffer, context_handle.data(), context_handle.size());
+                if (context_handle != k_sspi_context_handle)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                std::vector<uint8_t> request(c.send_buffer_length);
+                win_emu.emu().read_memory(c.send_buffer, request.data(), request.size());
+
+                std::optional<size_t> credential_offset;
+                const auto full_handle_it =
+                    std::search(request.begin(), request.end(), k_sspi_credential_handle.begin(), k_sspi_credential_handle.end());
+                if (full_handle_it != request.end())
+                {
+                    credential_offset = static_cast<size_t>(std::distance(request.begin(), full_handle_it));
+                }
+                else
+                {
+                    const auto upper_handle_it =
+                        std::search(request.begin(), request.end(), k_sspi_credential_handle.begin() + 8, k_sspi_credential_handle.end());
+                    if (upper_handle_it != request.end())
+                    {
+                        credential_offset = static_cast<size_t>(std::distance(request.begin(), upper_handle_it));
+                    }
+                }
+
+                win_emu.log.print(color::gray, "SSPI_RPC procedure_id=5 body_length=" + std::to_string(c.send_buffer_length) +
+                                                   " credential_handle_round_tripped=" + (credential_offset ? "yes" : "no") +
+                                                   " credential_handle_offset=" +
+                                                   (credential_offset ? std::to_string(*credential_offset) : std::string{"unavailable"}) +
+                                                   "\n");
+
+                if (!credential_offset)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                if (writer.offset() != 0x18)
+                {
+                    win_emu.log.warn("[sspi-rpc] unexpected op5 RPC header size: 0x%llX\n",
+                                     static_cast<unsigned long long>(writer.offset()));
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                const auto procedure_start = writer.offset();
+                writer.write<uint32_t>(0);
+                writer.write_pointer_sized(0);
+                writer.write_pointer_sized(0);
+                writer.write<uint32_t>(0);
+                writer.write<uint32_t>(0);
+                writer.write_ndr_pointer(false);
+                writer.write<int8_t>(0);
+                writer.align_to(8);
+                writer.write<int32_t>(0);
+                writer.align_to(8);
+
+                const auto procedure_size = writer.offset() - procedure_start;
+                if (procedure_size != 0x38 || writer.offset() != 0x50)
+                {
+                    win_emu.log.warn("[sspi-rpc] malformed FreeCredentials reply: procedure=0x%llX payload=0x%llX\n",
+                                     static_cast<unsigned long long>(procedure_size), static_cast<unsigned long long>(writer.offset()));
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                win_emu.log.print(color::gray, "[sspi-rpc] FreeCredentials Windows-reference reply\n"
+                                               "procedure_body_size=0x38\n"
+                                               "rpc_payload_size=0x50\n");
+                return STATUS_SUCCESS;
+            }
+
+            NTSTATUS handle_process_security_context_diagnostic(windows_emulator& win_emu, const lpc_request_context& c)
+            {
+                constexpr size_t max_sspi_rpc_dump = 0x4000;
+                const auto dump_length = std::min<size_t>(c.send_buffer_length, max_sspi_rpc_dump);
+                std::vector<uint8_t> request(dump_length);
+                if (c.send_buffer && !request.empty())
+                {
+                    win_emu.emu().read_memory(c.send_buffer, request.data(), request.size());
+                }
+
+                std::optional<size_t> credential_offset;
+                if (request.size() >= k_sspi_credential_handle.size())
+                {
+                    const auto it =
+                        std::search(request.begin(), request.end(), k_sspi_credential_handle.begin(), k_sspi_credential_handle.end());
+                    if (it != request.end())
+                    {
+                        credential_offset = static_cast<size_t>(std::distance(request.begin(), it));
+                    }
+                }
+
+                win_emu.log.print(color::gray,
+                                  "SSPI_RPC procedure_id=6 body_length=" + std::to_string(c.send_buffer_length) +
+                                      " captured_length=" + std::to_string(request.size()) + " credential_handle_round_tripped=" +
+                                      (credential_offset ? "yes" : "no") + " credential_handle_offset=" +
+                                      (credential_offset ? std::to_string(*credential_offset) : std::string{"unavailable"}) + "\n");
+
+                constexpr size_t dump_chunk_size = 64;
+                for (size_t offset = 0; offset < request.size(); offset += dump_chunk_size)
+                {
+                    const auto chunk_length = std::min(dump_chunk_size, request.size() - offset);
+                    win_emu.log.print(color::gray, "SSPI_RPC procedure_6_body offset=" + std::to_string(offset) +
+                                                       " data=" + sspi_hex_dump(request.data() + offset, chunk_length) + "\n");
+                }
+
                 return STATUS_NOT_SUPPORTED;
             }
 
