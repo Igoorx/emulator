@@ -25,6 +25,16 @@ namespace sogen
         constexpr std::array<uint8_t, 16> k_sspi_credential_handle = {
             0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
         };
+        constexpr std::array<uint8_t, 0x91> k_sspi_initial_tls_token = {
+            0x16, 0x03, 0x03, 0x00, 0x8c, 0x01, 0x00, 0x00, 0x88, 0x03, 0x03, 0x6a, 0xa4, 0xca, 0x8b, 0x0f, 0x7d, 0xe7, 0x0e, 0xed, 0xb2,
+            0x68, 0x1f, 0xc9, 0xda, 0x6e, 0xb8, 0x25, 0x46, 0xf8, 0xe0, 0x0d, 0x58, 0x2b, 0xc4, 0x87, 0x25, 0x13, 0xe3, 0xc9, 0xda, 0xd7,
+            0x0a, 0x00, 0x00, 0x10, 0xc0, 0x2c, 0xc0, 0x2b, 0xc0, 0x30, 0xc0, 0x2f, 0xc0, 0x24, 0xc0, 0x23, 0xc0, 0x28, 0xc0, 0x27, 0x01,
+            0x00, 0x00, 0x4f, 0x00, 0x00, 0x00, 0x10, 0x00, 0x0e, 0x00, 0x00, 0x0b, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x63,
+            0x6f, 0x6d, 0x00, 0x0a, 0x00, 0x06, 0x00, 0x04, 0x00, 0x18, 0x00, 0x17, 0x00, 0x0b, 0x00, 0x02, 0x01, 0x00, 0x00, 0x0d, 0x00,
+            0x1a, 0x00, 0x18, 0x08, 0x04, 0x08, 0x05, 0x08, 0x06, 0x04, 0x01, 0x05, 0x01, 0x02, 0x01, 0x04, 0x03, 0x05, 0x03, 0x02, 0x03,
+            0x02, 0x02, 0x06, 0x01, 0x06, 0x03, 0x00, 0x23, 0x00, 0x00, 0x00, 0x17, 0x00, 0x00, 0xff, 0x01, 0x00, 0x01, 0x00,
+        };
+        static_assert(k_sspi_initial_tls_token.size() == 0x91);
 
         std::string sspi_hex_dump(const uint8_t* data, const size_t length)
         {
@@ -76,7 +86,11 @@ namespace sogen
                     return handle_free_credentials(win_emu, c, writer);
 
                 case 6:
-                    return handle_process_security_context_diagnostic(win_emu, c);
+                    return handle_process_security_context(win_emu, c, writer);
+
+                case 7:
+                    return handle_delete_security_context_diagnostic(win_emu, c);
+
                 default:
                     return STATUS_NOT_SUPPORTED;
                 }
@@ -508,38 +522,236 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            NTSTATUS handle_process_security_context_diagnostic(windows_emulator& win_emu, const lpc_request_context& c)
+            NTSTATUS handle_process_security_context(windows_emulator& win_emu, const lpc_request_context& c,
+                                                     utils::aligned_binary_writer& writer)
             {
-                constexpr size_t max_sspi_rpc_dump = 0x4000;
-                const auto dump_length = std::min<size_t>(c.send_buffer_length, max_sspi_rpc_dump);
-                std::vector<uint8_t> request(dump_length);
-                if (c.send_buffer && !request.empty())
-                {
-                    win_emu.emu().read_memory(c.send_buffer, request.data(), request.size());
-                }
-
-                std::optional<size_t> credential_offset;
-                if (request.size() >= k_sspi_credential_handle.size())
-                {
-                    const auto it =
-                        std::search(request.begin(), request.end(), k_sspi_credential_handle.begin(), k_sspi_credential_handle.end());
-                    if (it != request.end())
-                    {
-                        credential_offset = static_cast<size_t>(std::distance(request.begin(), it));
-                    }
-                }
-
-                win_emu.log.print(color::gray,
-                                  "SSPI_RPC procedure_id=6 body_length=" + std::to_string(c.send_buffer_length) +
-                                      " captured_length=" + std::to_string(request.size()) + " credential_handle_round_tripped=" +
-                                      (credential_offset ? "yes" : "no") + " credential_handle_offset=" +
-                                      (credential_offset ? std::to_string(*credential_offset) : std::string{"unavailable"}) + "\n");
-
+                constexpr size_t minimum_request_size = 0x110;
                 constexpr size_t dump_chunk_size = 64;
+
+                if (writer.pointer_size() != utils::aligned_binary_writer::pointer_size_64 || !c.send_buffer ||
+                    c.send_buffer_length < minimum_request_size)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                std::vector<uint8_t> request(c.send_buffer_length);
+                win_emu.emu().read_memory(c.send_buffer, request.data(), request.size());
+
+                win_emu.log.print(color::gray, "SSPI_RPC procedure_id=6 body_length=" + std::to_string(c.send_buffer_length) +
+                                                   " captured_length=" + std::to_string(request.size()) + "\n");
                 for (size_t offset = 0; offset < request.size(); offset += dump_chunk_size)
                 {
                     const auto chunk_length = std::min(dump_chunk_size, request.size() - offset);
                     win_emu.log.print(color::gray, "SSPI_RPC procedure_6_body offset=" + std::to_string(offset) +
+                                                       " data=" + sspi_hex_dump(request.data() + offset, chunk_length) + "\n");
+                }
+
+                const auto read_u16 = [&request](const size_t offset) {
+                    uint16_t value{};
+                    std::memcpy(&value, request.data() + offset, sizeof(value));
+                    return value;
+                };
+                const auto read_u32 = [&request](const size_t offset) {
+                    uint32_t value{};
+                    std::memcpy(&value, request.data() + offset, sizeof(value));
+                    return value;
+                };
+                const auto read_u64 = [&request](const size_t offset) {
+                    uint64_t value{};
+                    std::memcpy(&value, request.data() + offset, sizeof(value));
+                    return value;
+                };
+
+                const auto struct_2_member0 = read_u64(0x18);
+                const auto struct_2_member1 = read_u64(0x20);
+                const auto arg_2 = read_u32(0x28);
+                const auto target_referent = read_u64(0x30);
+                const auto target_length = read_u16(0x38);
+                const auto target_maximum_length = read_u16(0x3a);
+                const auto target_buffer_referent = read_u64(0x40);
+                const auto target_maximum_count = read_u64(0x48);
+                const auto target_offset = read_u64(0x50);
+                const auto target_element_count = read_u64(0x58);
+                const auto arg_4_lower = read_u64(0x78);
+                const auto arg_4_upper = read_u64(0x80);
+                const auto arg_5_lower = read_u64(0x88);
+                const auto arg_5_upper = read_u64(0x90);
+                const auto arg_6 = read_u32(0x98);
+                const auto arg_7 = read_u32(0x9c);
+                const auto ip_address_referent = read_u64(0xa0);
+                const auto arg_9_referent = read_u64(0xa8);
+                const auto arg_10_version = read_u32(0xb0);
+                const auto arg_10_buffer_count = read_u32(0xb4);
+                const auto arg_10_buffers_referent = read_u64(0xb8);
+                const auto arg_11_member0 = read_u32(0xc0);
+                const auto arg_11_member1 = read_u32(0xc4);
+                const auto arg_11_array_referent = read_u64(0xc8);
+                const auto arg_11_element_count = read_u64(0xd0);
+                const auto nested_member0 = read_u32(0xd8);
+                const auto nested_member1 = read_u32(0xdc);
+
+                const std::u16string_view expected_target = u"example.com";
+                const bool target_data_in_bounds = target_element_count <= (request.size() - 0x60) / sizeof(char16_t);
+                const bool target_text_matches =
+                    target_data_in_bounds && target_length == expected_target.size() * sizeof(char16_t) &&
+                    target_maximum_length == (expected_target.size() + 1) * sizeof(char16_t) && target_offset == 0 &&
+                    target_element_count == expected_target.size() &&
+                    std::memcmp(request.data() + 0x60, expected_target.data(), expected_target.size() * sizeof(char16_t)) == 0;
+                std::string target;
+                if (target_data_in_bounds)
+                {
+                    target.reserve(static_cast<size_t>(target_element_count));
+                    for (uint64_t index = 0; index < target_element_count; ++index)
+                    {
+                        const auto character = read_u16(0x60 + static_cast<size_t>(index) * sizeof(char16_t));
+                        target.push_back(character <= 0x7f ? static_cast<char>(character) : '?');
+                    }
+                }
+                else
+                {
+                    target = "<out-of-bounds>";
+                }
+
+                win_emu.log.print(
+                    color::gray,
+                    "SSPI_RPC procedure_id=6 decoded"
+                    " struct_2_member0=0x%llX"
+                    " struct_2_member1=0x%llX"
+                    " arg_2=0x%X"
+                    " target_referent=0x%llX"
+                    " target_length=0x%X"
+                    " target_maximum_length=0x%X"
+                    " target_buffer_referent=0x%llX"
+                    " target_maximum_count=0x%llX"
+                    " target_offset=0x%llX"
+                    " target_element_count=0x%llX"
+                    " target=%s"
+                    " arg_4_lower=0x%llX"
+                    " arg_4_upper=0x%llX"
+                    " arg_5_lower=0x%llX"
+                    " arg_5_upper=0x%llX"
+                    " arg_6=0x%X"
+                    " arg_7=0x%X"
+                    " ip_address_referent=0x%llX"
+                    " arg_9_referent=0x%llX"
+                    " arg_10_version=0x%X"
+                    " arg_10_buffer_count=0x%X"
+                    " arg_10_buffers_referent=0x%llX"
+                    " arg_11_member0=0x%X"
+                    " arg_11_member1=0x%X"
+                    " arg_11_array_referent=0x%llX"
+                    " arg_11_element_count=0x%llX"
+                    " nested_member0=0x%X"
+                    " nested_member1=0x%X"
+                    " credential_upper_matches=%s\n",
+                    static_cast<unsigned long long>(struct_2_member0), static_cast<unsigned long long>(struct_2_member1), arg_2,
+                    static_cast<unsigned long long>(target_referent), target_length, target_maximum_length,
+                    static_cast<unsigned long long>(target_buffer_referent), static_cast<unsigned long long>(target_maximum_count),
+                    static_cast<unsigned long long>(target_offset), static_cast<unsigned long long>(target_element_count), target.c_str(),
+                    static_cast<unsigned long long>(arg_4_lower), static_cast<unsigned long long>(arg_4_upper),
+                    static_cast<unsigned long long>(arg_5_lower), static_cast<unsigned long long>(arg_5_upper), arg_6, arg_7,
+                    static_cast<unsigned long long>(ip_address_referent), static_cast<unsigned long long>(arg_9_referent), arg_10_version,
+                    arg_10_buffer_count, static_cast<unsigned long long>(arg_10_buffers_referent), arg_11_member0, arg_11_member1,
+                    static_cast<unsigned long long>(arg_11_array_referent), static_cast<unsigned long long>(arg_11_element_count),
+                    nested_member0, nested_member1, arg_4_upper == k_sspi_credential_upper ? "yes" : "no");
+
+                if (arg_4_upper != k_sspi_credential_upper || arg_5_lower != 0 || arg_5_upper != 0 || arg_6 != 0xc11c || arg_7 != 0x10 ||
+                    !target_text_matches)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                if (writer.offset() != 0x18)
+                {
+                    win_emu.log.warn("[sspi-rpc] unexpected op6 RPC header size: 0x%llX\n",
+                                     static_cast<unsigned long long>(writer.offset()));
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                const auto procedure_start = writer.offset();
+
+                writer.write<int32_t>(0);
+                writer.align_to(8);
+
+                writer.write<int32_t>(0);
+                writer.write<int32_t>(1);
+                writer.write_ndr_pointer(true);
+                writer.write_pointer_sized(1);
+                writer.write<uint32_t>(static_cast<uint32_t>(k_sspi_initial_tls_token.size()));
+                writer.write<uint32_t>(2);
+                writer.write_ndr_pointer(true);
+                writer.write_pointer_sized(k_sspi_initial_tls_token.size());
+                writer.write(k_sspi_initial_tls_token.data(), k_sspi_initial_tls_token.size(), 1);
+                writer.align_to(8);
+
+                writer.write_ndr_pointer(false);
+
+                writer.write<uint32_t>(0);
+                writer.write<uint32_t>(0);
+                writer.write_ndr_pointer(false);
+
+                writer.write<uint64_t>(9);
+                writer.write<uint64_t>(0x104f8);
+                writer.write<int32_t>(0xc11c);
+                writer.align_to(8);
+                writer.write<uint64_t>(0);
+                writer.write<int32_t>(0x00090312);
+                writer.align_to(8);
+
+                writer.write<uint32_t>(0);
+                writer.write_pointer_sized(0);
+                writer.write_pointer_sized(0);
+                writer.write<uint32_t>(0);
+                writer.write<uint32_t>(0);
+                writer.write_ndr_pointer(false);
+                writer.write<int8_t>(0);
+                writer.align_to(8);
+
+                writer.write<int32_t>(0);
+                writer.align_to(8);
+                writer.pad(0x98);
+
+                const auto procedure_size = writer.offset() - procedure_start;
+                if (procedure_size != 0x1e0 || writer.offset() != 0x1f8)
+                {
+                    win_emu.log.warn("[sspi-rpc] malformed ProcessSecurityContext reply: procedure=0x%llX payload=0x%llX\n",
+                                     static_cast<unsigned long long>(procedure_size), static_cast<unsigned long long>(writer.offset()));
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                win_emu.log.print(color::gray, "[sspi-rpc] ProcessSecurityContext Windows-reference reply\n"
+                                               "returned_context_lower=0x9\n"
+                                               "returned_context_upper=0x104f8\n"
+                                               "context_attributes=0xc11c\n"
+                                               "package_status=0x90312\n"
+                                               "rpc_function_return=0\n"
+                                               "token_length=0x91\n"
+                                               "procedure_body_size=0x1e0\n"
+                                               "rpc_payload_size=0x1f8\n");
+                return STATUS_SUCCESS;
+            }
+
+            NTSTATUS handle_delete_security_context_diagnostic(windows_emulator& win_emu, const lpc_request_context& c)
+            {
+                constexpr size_t dump_chunk_size = 64;
+
+                if (!c.send_buffer)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                std::vector<uint8_t> request(c.send_buffer_length);
+                if (!request.empty())
+                {
+                    win_emu.emu().read_memory(c.send_buffer, request.data(), request.size());
+                }
+
+                win_emu.log.print(color::gray, "SSPI_RPC procedure_id=7 body_length=" + std::to_string(c.send_buffer_length) +
+                                                   " captured_length=" + std::to_string(request.size()) + "\n");
+                for (size_t offset = 0; offset < request.size(); offset += dump_chunk_size)
+                {
+                    const auto chunk_length = std::min(dump_chunk_size, request.size() - offset);
+                    win_emu.log.print(color::gray, "SSPI_RPC procedure_7_body offset=" + std::to_string(offset) +
                                                        " data=" + sspi_hex_dump(request.data() + offset, chunk_length) + "\n");
                 }
 
