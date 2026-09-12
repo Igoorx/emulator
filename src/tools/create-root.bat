@@ -54,6 +54,7 @@ CALL :collect comdlg32.dll
 CALL :collect_file "%WINDIR%\System32\en-US", comdlg32.dll.mui, %EMU_SYSDIR%\en-us
 CALL :collect_file "%WINDIR%\SysWOW64\en-US", comdlg32.dll.mui, %EMU_SYSDIR_WOW64%\en-us
 CALL :collect coremessaging.dll
+CALL :collect credssp.dll
 CALL :collect crypt32.dll
 CALL :collect cryptbase.dll
 CALL :collect cryptsp.dll
@@ -108,6 +109,7 @@ CALL :collect msasn1.dll
 CALL :collect mscms.dll
 CALL :collect mscoree.dll
 CALL :collect msdmo.dll
+CALL :collect mskeyprotect.dll
 CALL :collect msvcp140.dll
 CALL :collect msvcp140d.dll
 CALL :collect msvcp60.dll
@@ -140,6 +142,7 @@ CALL :collect rpcrt4.dll
 CALL :collect rpcss.dll
 CALL :collect rstrtmgr.dll
 CALL :collect rsaenh.dll
+CALL :collect schannel.dll
 CALL :collect sechost.dll
 CALL :collect setupapi.dll
 CALL :collect shcore.dll

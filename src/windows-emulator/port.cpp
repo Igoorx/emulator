@@ -8,6 +8,7 @@
 #include "ports/dns_resolver.hpp"
 #include "ports/lsa_policy_lookup.hpp"
 #include "ports/service_control.hpp"
+#include "ports/sspi_rpc.hpp"
 #include "binary_writer.hpp"
 
 #include <platform/unicode.hpp>
@@ -129,6 +130,11 @@ namespace sogen
             // service through svcctl while creating a render audio client, so the open/close calls must return
             // a real context handle; other interfaces on this port fall back to a zero-payload success.
             return create_service_control_port();
+        }
+
+        if (port == u"\\RPC Control\\lsasspirpc")
+        {
+            return create_sspi_rpc_port();
         }
 
         if (port == u"\\RPC Control\\umpo")

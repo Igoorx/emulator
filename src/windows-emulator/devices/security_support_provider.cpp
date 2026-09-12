@@ -4,12 +4,30 @@
 #include "../windows_emulator.hpp"
 
 #include <utils/string.hpp>
+#include <platform/unicode.hpp>
 
 namespace sogen
 {
 
     namespace
     {
+        std::string ksec_hex_dump(const uint8_t* data, const size_t length)
+        {
+            constexpr char hex_digits[] = "0123456789abcdef";
+            std::string result;
+            result.reserve(length * 3);
+            for (size_t i = 0; i < length; ++i)
+            {
+                if (i != 0)
+                {
+                    result.push_back(' ');
+                }
+                result.push_back(hex_digits[data[i] >> 4]);
+                result.push_back(hex_digits[data[i] & 0x0f]);
+            }
+            return result;
+        }
+
         struct ksec_algorithm_request
         {
             std::array<uint8_t, 6> reserved0;
@@ -131,32 +149,46 @@ namespace sogen
 
             NTSTATUS io_control(windows_emulator& win_emu, const io_device_context& c) override
             {
+                const auto log_result = [&](const NTSTATUS status, const char* stage) {
+                    win_emu.log.force_print(color::gray, "[ksecdd] ioctl=0x%08X stage=%s status=0x%08X input=0x%llX/%u output=0x%llX/%u\n",
+                                            static_cast<unsigned>(c.io_control_code), stage, static_cast<unsigned>(status),
+                                            static_cast<unsigned long long>(c.input_buffer), static_cast<unsigned>(c.input_buffer_length),
+                                            static_cast<unsigned long long>(c.output_buffer),
+                                            static_cast<unsigned>(c.output_buffer_length));
+                    return status;
+                };
+
                 if (c.io_control_code != 0x390400)
                 {
-                    return STATUS_NOT_SUPPORTED;
+                    return log_result(STATUS_NOT_SUPPORTED, "unsupported_ioctl");
                 }
 
                 if (!c.input_buffer || c.input_buffer_length < ksec_algorithm_request_min_size)
                 {
-                    return STATUS_INVALID_PARAMETER;
+                    return log_result(STATUS_INVALID_PARAMETER, "invalid_input");
                 }
+
+                const auto request_dump_length = std::min<size_t>(c.input_buffer_length, 0x1000);
+                std::vector<uint8_t> request_dump(request_dump_length);
+                win_emu.emu().read_memory(c.input_buffer, request_dump.data(), request_dump.size());
 
                 const auto request =
                     win_emu.emu().read_memory<ksec_algorithm_request>(c.input_buffer, static_cast<size_t>(c.input_buffer_length));
+                const auto algorithm_name = utils::string::to_string_view<char16_t>(request.algorithm_name);
+                const auto algorithm_name_utf8 = request.operation == 2 ? u16_to_u8(algorithm_name) : std::string{"<unused>"};
+                const auto request_hex = ksec_hex_dump(request_dump.data(), request_dump.size());
+                win_emu.log.force_print(color::gray, "[ksecdd] operation=%u algorithm=%s request=%s\n",
+                                        static_cast<unsigned>(request.operation), algorithm_name_utf8.c_str(), request_hex.c_str());
 
                 if (request.operation != 2)
                 {
-                    return STATUS_SUCCESS;
+                    return log_result(STATUS_SUCCESS, "operation_not_2");
                 }
 
-                // bcrypt sizes the request to the name it carries (0x38 bytes for "MD5"), so it can be shorter than
-                // the struct. The field is guest-controlled and may not be NUL-terminated.
-                const auto algorithm_name = utils::string::to_string_view<char16_t>(request.algorithm_name);
-
-                const auto write_response = [&](const auto& output_data) -> NTSTATUS {
+                const auto write_response = [&](const auto& output_data, const char* stage) -> NTSTATUS {
                     if (!c.output_buffer || c.output_buffer_length < sizeof(output_data))
                     {
-                        return STATUS_BUFFER_TOO_SMALL;
+                        return log_result(STATUS_BUFFER_TOO_SMALL, "response_buffer_too_small");
                     }
 
                     win_emu.emu().write_memory(c.output_buffer, output_data);
@@ -168,7 +200,7 @@ namespace sogen
                         c.io_status_block.write(block);
                     }
 
-                    return STATUS_SUCCESS;
+                    return log_result(STATUS_SUCCESS, stage);
                 };
 
                 // Hash providers differ from their same-length sibling only in the
@@ -180,7 +212,7 @@ namespace sogen
                 {
                     if (!c.output_buffer || c.output_buffer_length < hash->response.size())
                     {
-                        return STATUS_BUFFER_TOO_SMALL;
+                        return log_result(STATUS_BUFFER_TOO_SMALL, "hash_response_buffer_too_small");
                     }
 
                     // Copy: the template is shared between algorithms of the same size.
@@ -196,10 +228,10 @@ namespace sogen
                         c.io_status_block.write(block);
                     }
 
-                    return STATUS_SUCCESS;
+                    return log_result(STATUS_SUCCESS, "hash_response");
                 }
 
-                return write_response(rng_output_data);
+                return write_response(rng_output_data, "rng_response");
             }
         };
     }
