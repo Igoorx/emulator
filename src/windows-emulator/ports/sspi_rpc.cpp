@@ -525,7 +525,8 @@ namespace sogen
             NTSTATUS handle_process_security_context(windows_emulator& win_emu, const lpc_request_context& c,
                                                      utils::aligned_binary_writer& writer)
             {
-                constexpr size_t minimum_request_size = 0x110;
+                constexpr size_t target_data_offset = 0x60;
+                constexpr size_t callback_size = 0x30;
                 constexpr size_t dump_chunk_size = 64;
 
                 if (writer.pointer_size() != utils::aligned_binary_writer::pointer_size_64 || !c.send_buffer)
@@ -545,7 +546,7 @@ namespace sogen
                                                        " data=" + sspi_hex_dump(request.data() + offset, chunk_length) + "\n");
                 }
 
-                if (request.size() < minimum_request_size)
+                if (request.size() < target_data_offset)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
@@ -576,49 +577,172 @@ namespace sogen
                 const auto target_maximum_count = read_u64(0x48);
                 const auto target_offset = read_u64(0x50);
                 const auto target_element_count = read_u64(0x58);
-                const auto arg_4_lower = read_u64(0x78);
-                const auto arg_4_upper = read_u64(0x80);
-                const auto arg_5_lower = read_u64(0x88);
-                const auto arg_5_upper = read_u64(0x90);
-                const auto arg_6 = read_u32(0x98);
-                const auto arg_7 = read_u32(0x9c);
-                const auto ip_address_referent = read_u64(0xa0);
-                const auto arg_9_referent = read_u64(0xa8);
-                const auto arg_10_version = read_u32(0xb0);
-                const auto arg_10_buffer_count = read_u32(0xb4);
-                const auto arg_10_buffers_referent = read_u64(0xb8);
-                const auto arg_11_member0 = read_u32(0xc0);
-                const auto arg_11_member1 = read_u32(0xc4);
-                const auto arg_11_array_referent = read_u64(0xc8);
-                const auto arg_11_element_count = read_u64(0xd0);
-                const auto nested_member0 = read_u32(0xd8);
-                const auto nested_member1 = read_u32(0xdc);
 
-                const std::u16string_view expected_target = u"example.com";
-                const bool target_data_in_bounds = target_element_count <= (request.size() - 0x60) / sizeof(char16_t);
-                const bool target_text_matches =
-                    target_data_in_bounds && target_length == expected_target.size() * sizeof(char16_t) &&
-                    target_maximum_length == (expected_target.size() + 1) * sizeof(char16_t) && target_offset == 0 &&
-                    target_element_count == expected_target.size() &&
-                    std::memcmp(request.data() + 0x60, expected_target.data(), expected_target.size() * sizeof(char16_t)) == 0;
-                std::string target;
-                if (target_data_in_bounds)
+                const bool target_counts_valid =
+                    target_length % 2 == 0 && target_maximum_length % 2 == 0 && target_length <= target_maximum_length &&
+                    target_offset == 0 && target_maximum_count == target_maximum_length / 2 && target_element_count == target_length / 2;
+                if (!target_counts_valid || target_element_count > std::numeric_limits<size_t>::max() / sizeof(char16_t))
                 {
-                    target.reserve(static_cast<size_t>(target_element_count));
-                    for (uint64_t index = 0; index < target_element_count; ++index)
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                const auto target_bytes = static_cast<size_t>(target_element_count) * sizeof(char16_t);
+                const bool target_data_in_bounds = target_element_count <= (request.size() - target_data_offset) / sizeof(char16_t);
+                if (!target_data_in_bounds)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                std::string target;
+                target.reserve(static_cast<size_t>(target_element_count));
+                for (uint64_t index = 0; index < target_element_count; ++index)
+                {
+                    const auto character = read_u16(target_data_offset + static_cast<size_t>(index) * sizeof(char16_t));
+                    target.push_back(character <= 0x7f ? static_cast<char>(character) : '?');
+                }
+
+                const auto align8 = [](const size_t value) { return (value + 7) & ~size_t{7}; };
+
+                const auto post_target_offset = align8(target_data_offset + target_bytes);
+                if (post_target_offset > request.size() || request.size() - post_target_offset < 0x48)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                const auto arg_4_lower = read_u64(post_target_offset + 0x00);
+                const auto arg_4_upper = read_u64(post_target_offset + 0x08);
+                const auto arg_5_lower = read_u64(post_target_offset + 0x10);
+                const auto arg_5_upper = read_u64(post_target_offset + 0x18);
+                const auto arg_6 = read_u32(post_target_offset + 0x20);
+                const auto arg_7 = read_u32(post_target_offset + 0x24);
+                const auto ip_address_referent = read_u64(post_target_offset + 0x28);
+                const auto arg_9_referent = read_u64(post_target_offset + 0x30);
+                const auto arg_10_version = read_u32(post_target_offset + 0x38);
+                const auto arg_10_buffer_count = read_u32(post_target_offset + 0x3c);
+                const auto arg_10_buffers_referent = read_u64(post_target_offset + 0x40);
+
+                size_t arg_11_offset = post_target_offset + 0x48;
+                uint64_t arg_10_deferred_count = 0;
+                if (arg_10_buffers_referent != 0)
+                {
+                    if (arg_11_offset > request.size() || request.size() - arg_11_offset < sizeof(uint64_t))
                     {
-                        const auto character = read_u16(0x60 + static_cast<size_t>(index) * sizeof(char16_t));
-                        target.push_back(character <= 0x7f ? static_cast<char>(character) : '?');
+                        return STATUS_INVALID_PARAMETER;
+                    }
+
+                    arg_10_deferred_count = read_u64(arg_11_offset);
+                    arg_11_offset += sizeof(uint64_t);
+
+                    if (arg_10_deferred_count != arg_10_buffer_count)
+                    {
+                        return STATUS_INVALID_PARAMETER;
                     }
                 }
-                else
+                else if (arg_10_buffer_count != 0)
                 {
-                    target = "<out-of-bounds>";
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                struct decoded_sec_buffer
+                {
+                    uint32_t cb_buffer{};
+                    uint32_t buffer_type{};
+                    uint64_t buffer_referent{};
+                    uint64_t deferred_count{};
+                    size_t payload_offset{};
+                };
+
+                std::vector<decoded_sec_buffer> input_buffers;
+                if (arg_10_deferred_count > (request.size() - arg_11_offset) / 0x10)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                input_buffers.reserve(static_cast<size_t>(arg_10_deferred_count));
+                for (uint64_t index = 0; index < arg_10_deferred_count; ++index)
+                {
+                    const auto buffer_offset = arg_11_offset + static_cast<size_t>(index) * 0x10;
+                    input_buffers.push_back(
+                        {read_u32(buffer_offset + 0x00), read_u32(buffer_offset + 0x04), read_u64(buffer_offset + 0x08)});
+                }
+
+                arg_11_offset += static_cast<size_t>(arg_10_deferred_count) * 0x10;
+
+                for (auto& buffer : input_buffers)
+                {
+                    if (buffer.buffer_referent == 0)
+                    {
+                        continue;
+                    }
+
+                    if (arg_11_offset > request.size() || request.size() - arg_11_offset < sizeof(uint64_t))
+                    {
+                        return STATUS_INVALID_PARAMETER;
+                    }
+
+                    buffer.deferred_count = read_u64(arg_11_offset);
+                    arg_11_offset += sizeof(uint64_t);
+
+                    if (buffer.deferred_count != buffer.cb_buffer || buffer.deferred_count > request.size() - arg_11_offset)
+                    {
+                        return STATUS_INVALID_PARAMETER;
+                    }
+
+                    buffer.payload_offset = arg_11_offset;
+                    arg_11_offset += static_cast<size_t>(buffer.deferred_count);
+                    arg_11_offset = align8(arg_11_offset);
+                }
+
+                if (arg_11_offset > request.size() || request.size() - arg_11_offset < 0x10)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                const auto arg_11_member0 = read_u32(arg_11_offset + 0x00);
+                const auto arg_11_member1 = read_u32(arg_11_offset + 0x04);
+                const auto arg_11_array_referent = read_u64(arg_11_offset + 0x08);
+
+                size_t callback_offset = arg_11_offset + 0x10;
+                uint64_t arg_11_element_count = 0;
+                std::vector<std::array<uint32_t, 2>> nested_values;
+                if (arg_11_array_referent != 0)
+                {
+                    if (callback_offset > request.size() || request.size() - callback_offset < sizeof(uint64_t))
+                    {
+                        return STATUS_INVALID_PARAMETER;
+                    }
+
+                    arg_11_element_count = read_u64(callback_offset);
+                    callback_offset += sizeof(uint64_t);
+
+                    if (arg_11_element_count != arg_11_member1 || arg_11_element_count > (request.size() - callback_offset) / 8)
+                    {
+                        return STATUS_INVALID_PARAMETER;
+                    }
+
+                    nested_values.reserve(static_cast<size_t>(arg_11_element_count));
+                    for (uint64_t index = 0; index < arg_11_element_count; ++index)
+                    {
+                        const auto nested_offset = callback_offset + static_cast<size_t>(index) * 8;
+                        nested_values.push_back({read_u32(nested_offset + 0), read_u32(nested_offset + 4)});
+                    }
+
+                    callback_offset += static_cast<size_t>(arg_11_element_count) * 8;
+                }
+                else if (arg_11_member1 != 0)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                if (callback_offset > request.size() || request.size() - callback_offset != callback_size)
+                {
+                    return STATUS_INVALID_PARAMETER;
                 }
 
                 win_emu.log.print(
                     color::gray,
                     "SSPI_RPC procedure_id=6 decoded"
+                    " body_length=0x%llX"
                     " struct_2_member0=0x%llX"
                     " struct_2_member1=0x%llX"
                     " arg_2=0x%X"
@@ -630,6 +754,7 @@ namespace sogen
                     " target_offset=0x%llX"
                     " target_element_count=0x%llX"
                     " target=%s"
+                    " post_target_offset=0x%llX"
                     " arg_4_lower=0x%llX"
                     " arg_4_upper=0x%llX"
                     " arg_5_lower=0x%llX"
@@ -641,26 +766,70 @@ namespace sogen
                     " arg_10_version=0x%X"
                     " arg_10_buffer_count=0x%X"
                     " arg_10_buffers_referent=0x%llX"
+                    " arg_10_pointer=%s"
+                    " arg_10_deferred_count=0x%llX"
+                    " arg_11_offset=0x%llX"
                     " arg_11_member0=0x%X"
                     " arg_11_member1=0x%X"
                     " arg_11_array_referent=0x%llX"
                     " arg_11_element_count=0x%llX"
-                    " nested_member0=0x%X"
-                    " nested_member1=0x%X"
+                    " callback_offset=0x%llX"
                     " credential_upper_matches=%s\n",
-                    static_cast<unsigned long long>(struct_2_member0), static_cast<unsigned long long>(struct_2_member1), arg_2,
-                    static_cast<unsigned long long>(target_referent), target_length, target_maximum_length,
-                    static_cast<unsigned long long>(target_buffer_referent), static_cast<unsigned long long>(target_maximum_count),
-                    static_cast<unsigned long long>(target_offset), static_cast<unsigned long long>(target_element_count), target.c_str(),
-                    static_cast<unsigned long long>(arg_4_lower), static_cast<unsigned long long>(arg_4_upper),
-                    static_cast<unsigned long long>(arg_5_lower), static_cast<unsigned long long>(arg_5_upper), arg_6, arg_7,
-                    static_cast<unsigned long long>(ip_address_referent), static_cast<unsigned long long>(arg_9_referent), arg_10_version,
-                    arg_10_buffer_count, static_cast<unsigned long long>(arg_10_buffers_referent), arg_11_member0, arg_11_member1,
-                    static_cast<unsigned long long>(arg_11_array_referent), static_cast<unsigned long long>(arg_11_element_count),
-                    nested_member0, nested_member1, arg_4_upper == k_sspi_credential_upper ? "yes" : "no");
+                    static_cast<unsigned long long>(c.send_buffer_length), static_cast<unsigned long long>(struct_2_member0),
+                    static_cast<unsigned long long>(struct_2_member1), arg_2, static_cast<unsigned long long>(target_referent),
+                    target_length, target_maximum_length, static_cast<unsigned long long>(target_buffer_referent),
+                    static_cast<unsigned long long>(target_maximum_count), static_cast<unsigned long long>(target_offset),
+                    static_cast<unsigned long long>(target_element_count), target.c_str(),
+                    static_cast<unsigned long long>(post_target_offset), static_cast<unsigned long long>(arg_4_lower),
+                    static_cast<unsigned long long>(arg_4_upper), static_cast<unsigned long long>(arg_5_lower),
+                    static_cast<unsigned long long>(arg_5_upper), arg_6, arg_7, static_cast<unsigned long long>(ip_address_referent),
+                    static_cast<unsigned long long>(arg_9_referent), arg_10_version, arg_10_buffer_count,
+                    static_cast<unsigned long long>(arg_10_buffers_referent), arg_10_buffers_referent == 0 ? "null" : "non-null",
+                    static_cast<unsigned long long>(arg_10_deferred_count), static_cast<unsigned long long>(arg_11_offset), arg_11_member0,
+                    arg_11_member1, static_cast<unsigned long long>(arg_11_array_referent),
+                    static_cast<unsigned long long>(arg_11_element_count), static_cast<unsigned long long>(callback_offset),
+                    arg_4_upper == k_sspi_credential_upper ? "yes" : "no");
 
-                if (arg_4_upper != k_sspi_credential_upper || arg_5_lower != 0 || arg_5_upper != 0 || arg_6 != 0xc11c || arg_7 != 0x10 ||
-                    !target_text_matches)
+                for (size_t index = 0; index < input_buffers.size(); ++index)
+                {
+                    const auto& buffer = input_buffers[index];
+                    win_emu.log.print(
+                        color::gray,
+                        "SSPI_RPC procedure_id=6 input_buffer[%llu]"
+                        " cbBuffer=0x%X"
+                        " BufferType=0x%X"
+                        " pvBuffer=0x%llX"
+                        " pvBuffer_pointer=%s"
+                        " deferred_count=0x%llX"
+                        " payload_offset=0x%llX\n",
+                        static_cast<unsigned long long>(index), buffer.cb_buffer, buffer.buffer_type,
+                        static_cast<unsigned long long>(buffer.buffer_referent), buffer.buffer_referent == 0 ? "null" : "non-null",
+                        static_cast<unsigned long long>(buffer.deferred_count), static_cast<unsigned long long>(buffer.payload_offset));
+
+                    for (size_t payload_offset = 0; payload_offset < buffer.deferred_count; payload_offset += dump_chunk_size)
+                    {
+                        const auto chunk_length = std::min(static_cast<size_t>(buffer.deferred_count) - payload_offset, dump_chunk_size);
+                        win_emu.log.print(color::gray, "SSPI_RPC procedure_id=6 input_buffer[%llu]_payload offset=0x%llX data=%s\n",
+                                          static_cast<unsigned long long>(index),
+                                          static_cast<unsigned long long>(buffer.payload_offset + payload_offset),
+                                          sspi_hex_dump(request.data() + buffer.payload_offset + payload_offset, chunk_length).c_str());
+                    }
+                }
+
+                for (size_t index = 0; index < nested_values.size(); ++index)
+                {
+                    win_emu.log.print(color::gray, "SSPI_RPC procedure_id=6 nested[%llu] member0=0x%X member1=0x%X\n",
+                                      static_cast<unsigned long long>(index), nested_values[index][0], nested_values[index][1]);
+                }
+
+                if (arg_10_deferred_count != 0)
+                {
+                    win_emu.log.print(color::gray, "SSPI_RPC procedure_id=6 second-leg input capture complete; "
+                                                   "response intentionally unsupported\n");
+                    return STATUS_NOT_SUPPORTED;
+                }
+
+                if (arg_4_upper != k_sspi_credential_upper || arg_5_lower != 0 || arg_5_upper != 0)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
