@@ -89,7 +89,7 @@ namespace sogen
                     return handle_process_security_context(win_emu, c, writer);
 
                 case 7:
-                    return handle_delete_security_context_diagnostic(win_emu, c);
+                    return handle_delete_security_context(win_emu, c, writer);
 
                 default:
                     return STATUS_NOT_SUPPORTED;
@@ -731,20 +731,27 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            NTSTATUS handle_delete_security_context_diagnostic(windows_emulator& win_emu, const lpc_request_context& c)
+            NTSTATUS handle_delete_security_context(windows_emulator& win_emu, const lpc_request_context& c,
+                                                    utils::aligned_binary_writer& writer)
             {
+                constexpr size_t minimum_request_size = 0x38;
                 constexpr size_t dump_chunk_size = 64;
 
-                if (!c.send_buffer)
+                if (writer.pointer_size() != utils::aligned_binary_writer::pointer_size_64 || !c.send_buffer ||
+                    c.send_buffer_length < minimum_request_size)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                std::array<uint8_t, k_sspi_context_handle.size()> context_handle{};
+                win_emu.emu().read_memory(c.send_buffer, context_handle.data(), context_handle.size());
+                if (context_handle != k_sspi_context_handle)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
 
                 std::vector<uint8_t> request(c.send_buffer_length);
-                if (!request.empty())
-                {
-                    win_emu.emu().read_memory(c.send_buffer, request.data(), request.size());
-                }
+                win_emu.emu().read_memory(c.send_buffer, request.data(), request.size());
 
                 win_emu.log.print(color::gray, "SSPI_RPC procedure_id=7 body_length=" + std::to_string(c.send_buffer_length) +
                                                    " captured_length=" + std::to_string(request.size()) + "\n");
@@ -755,7 +762,64 @@ namespace sogen
                                                        " data=" + sspi_hex_dump(request.data() + offset, chunk_length) + "\n");
                 }
 
-                return STATUS_NOT_SUPPORTED;
+                const auto read_u64 = [&request](const size_t offset) {
+                    uint64_t value{};
+                    std::memcpy(&value, request.data() + offset, sizeof(value));
+                    return value;
+                };
+
+                const auto struct_member0 = read_u64(0x18);
+                const auto struct_member1 = read_u64(0x20);
+                const auto context_lower = read_u64(0x28);
+                const auto context_upper = read_u64(0x30);
+
+                win_emu.log.print(color::gray,
+                                  "SSPI_RPC procedure_id=7 decoded"
+                                  " struct_member0=0x%llX"
+                                  " struct_member1=0x%llX"
+                                  " context_lower=0x%llX"
+                                  " context_upper=0x%llX\n",
+                                  static_cast<unsigned long long>(struct_member0), static_cast<unsigned long long>(struct_member1),
+                                  static_cast<unsigned long long>(context_lower), static_cast<unsigned long long>(context_upper));
+
+                if (context_upper != 0x104f8)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                if (writer.offset() != 0x18)
+                {
+                    win_emu.log.warn("[sspi-rpc] unexpected op7 RPC header size: 0x%llX\n",
+                                     static_cast<unsigned long long>(writer.offset()));
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                const auto procedure_start = writer.offset();
+
+                writer.write<uint32_t>(0);
+                writer.write_pointer_sized(0);
+                writer.write_pointer_sized(0);
+                writer.write<uint32_t>(0);
+                writer.write<uint32_t>(0);
+                writer.write_ndr_pointer(false);
+                writer.write<int8_t>(0);
+                writer.align_to(8);
+                writer.write<int32_t>(0);
+                writer.align_to(8);
+
+                const auto procedure_size = writer.offset() - procedure_start;
+                if (procedure_size != 0x38 || writer.offset() != 0x50)
+                {
+                    win_emu.log.warn("[sspi-rpc] malformed DeleteSecurityContext reply: procedure=0x%llX payload=0x%llX\n",
+                                     static_cast<unsigned long long>(procedure_size), static_cast<unsigned long long>(writer.offset()));
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                win_emu.log.print(color::gray, "[sspi-rpc] DeleteSecurityContext Windows-reference reply\n"
+                                               "context_upper=0x104f8\n"
+                                               "procedure_body_size=0x38\n"
+                                               "rpc_payload_size=0x50\n");
+                return STATUS_SUCCESS;
             }
 
             static NTSTATUS handle_connect_rpc(windows_emulator& win_emu, const lpc_request_context& c,
