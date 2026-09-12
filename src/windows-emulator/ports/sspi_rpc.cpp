@@ -528,8 +528,7 @@ namespace sogen
                 constexpr size_t minimum_request_size = 0x110;
                 constexpr size_t dump_chunk_size = 64;
 
-                if (writer.pointer_size() != utils::aligned_binary_writer::pointer_size_64 || !c.send_buffer ||
-                    c.send_buffer_length < minimum_request_size)
+                if (writer.pointer_size() != utils::aligned_binary_writer::pointer_size_64 || !c.send_buffer)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
@@ -544,6 +543,11 @@ namespace sogen
                     const auto chunk_length = std::min(dump_chunk_size, request.size() - offset);
                     win_emu.log.print(color::gray, "SSPI_RPC procedure_6_body offset=" + std::to_string(offset) +
                                                        " data=" + sspi_hex_dump(request.data() + offset, chunk_length) + "\n");
+                }
+
+                if (request.size() < minimum_request_size)
+                {
+                    return STATUS_INVALID_PARAMETER;
                 }
 
                 const auto read_u16 = [&request](const size_t offset) {
