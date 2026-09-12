@@ -46,3 +46,52 @@ jobs:
           working-directory: root
           path: "*"
           retention-days: 1
+
+  sspi-alpc-capture:
+    name: SSPI ALPC Capture
+    runs-on: windows-2025
+    defaults:
+      run:
+        working-directory: sspi_alpc_capture
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v7
+
+      - name: Configure x64 capture utility
+        run: cmake -S . -B build -A x64
+
+      - name: Build release capture utility
+        run: cmake --build build --config Release
+
+      - name: Run live Schannel capture
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force capture -ErrorAction SilentlyContinue
+          & .\build\Release\sspi_alpc_capture.exe 2>&1 |
+            Tee-Object -FilePath capture_console.log
+          $captureExitCode = $LASTEXITCODE
+          Set-Content -Path capture_exit_code.txt -Value $captureExitCode
+          "CAPTURE_EXIT_CODE=$captureExitCode" | Out-File -FilePath $env:GITHUB_ENV -Append
+          exit 0
+
+      - name: Upload SSPI ALPC capture results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sspi-alpc-capture-results-windows-x64
+          path: |
+            sspi_alpc_capture/capture
+            sspi_alpc_capture/capture_console.log
+            sspi_alpc_capture/capture_exit_code.txt
+            sspi_alpc_capture/build/Release/sspi_alpc_capture.exe
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Enforce capture success
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:CAPTURE_EXIT_CODE -ne "0") {
+            Write-Error "Capture utility exited with $env:CAPTURE_EXIT_CODE"
+            exit 1
+          }
