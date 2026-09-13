@@ -247,46 +247,46 @@ namespace sogen
 
                 const size_t arguments = align_up(0x60 + static_cast<size_t>(target_count) * sizeof(char16_t), 8);
                 uint64_t input_ip_referent{};
-                uint64_t output_referent{};
-                uint32_t output_version{};
-                uint32_t output_count{};
-                uint64_t output_buffers_referent{};
+                uint64_t arg_9_referent{};
+                uint32_t arg_10_version{};
+                uint32_t arg_10_buffer_count{};
+                uint64_t arg_10_buffers_referent{};
                 if (!read_value(bytes, arguments + 0x00, result.credential.lower) ||
                     !read_value(bytes, arguments + 0x08, result.credential.upper) ||
                     !read_value(bytes, arguments + 0x10, result.context.lower) ||
                     !read_value(bytes, arguments + 0x18, result.context.upper) ||
                     !read_value(bytes, arguments + 0x20, result.requested_attributes) ||
                     !read_value(bytes, arguments + 0x24, result.representation) ||
-                    !read_value(bytes, arguments + 0x28, input_ip_referent) || !read_value(bytes, arguments + 0x30, output_referent) ||
-                    !read_value(bytes, arguments + 0x38, output_version) || !read_value(bytes, arguments + 0x3c, output_count) ||
-                    !read_value(bytes, arguments + 0x40, output_buffers_referent) || input_ip_referent != 0 || output_referent != 0 ||
-                    output_version != 0)
+                    !read_value(bytes, arguments + 0x28, input_ip_referent) || !read_value(bytes, arguments + 0x30, arg_9_referent) ||
+                    !read_value(bytes, arguments + 0x38, arg_10_version) || !read_value(bytes, arguments + 0x3c, arg_10_buffer_count) ||
+                    !read_value(bytes, arguments + 0x40, arg_10_buffers_referent) || input_ip_referent != 0 || arg_9_referent != 0 ||
+                    arg_10_version != 0)
                 {
                     return false;
                 }
 
                 size_t offset = arguments + 0x48;
-                uint64_t deferred_count{};
-                if (output_buffers_referent != 0)
+                uint64_t arg_10_deferred_count{};
+                if (arg_10_buffers_referent != 0)
                 {
-                    if (!read_value(bytes, offset, deferred_count) || deferred_count != output_count)
+                    if (!read_value(bytes, offset, arg_10_deferred_count) || arg_10_deferred_count != arg_10_buffer_count)
                     {
                         return false;
                     }
                     offset += sizeof(uint64_t);
                 }
-                else if (output_count != 0)
+                else if (arg_10_buffer_count != 0)
                 {
                     return false;
                 }
 
-                if (deferred_count > (bytes.size() - offset) / 0x10)
+                if (arg_10_deferred_count > (bytes.size() - offset) / 0x10)
                 {
                     return false;
                 }
 
-                result.buffers.reserve(static_cast<size_t>(deferred_count));
-                for (size_t index = 0; index < deferred_count; ++index)
+                result.buffers.reserve(static_cast<size_t>(arg_10_deferred_count));
+                for (size_t index = 0; index < arg_10_deferred_count; ++index)
                 {
                     decoded_buffer buffer{};
                     const size_t buffer_offset = offset + index * 0x10;
@@ -297,7 +297,7 @@ namespace sogen
                     }
                     result.buffers.push_back(buffer);
                 }
-                offset += static_cast<size_t>(deferred_count) * 0x10;
+                offset += static_cast<size_t>(arg_10_deferred_count) * 0x10;
 
                 for (auto& buffer : result.buffers)
                 {
@@ -324,26 +324,26 @@ namespace sogen
                     offset = align_up(offset + static_cast<size_t>(payload_count), 8);
                 }
 
-                uint32_t input_version{};
-                uint32_t nested_count{};
-                uint64_t nested_referent{};
-                if (!read_value(bytes, offset, input_version) || !read_value(bytes, offset + 4, nested_count) ||
-                    !read_value(bytes, offset + 8, nested_referent) || input_version != 0)
+                uint32_t arg_11_member_0{};
+                uint32_t arg_11_member_1{};
+                uint64_t arg_11_array_referent{};
+                if (!read_value(bytes, offset, arg_11_member_0) || !read_value(bytes, offset + 4, arg_11_member_1) ||
+                    !read_value(bytes, offset + 8, arg_11_array_referent) || arg_11_member_0 != 0)
                 {
                     return false;
                 }
                 offset += 0x10;
-                if (nested_referent != 0)
+                if (arg_11_array_referent != 0)
                 {
                     uint64_t conformant_count{};
-                    if (!read_value(bytes, offset, conformant_count) || conformant_count != nested_count ||
+                    if (!read_value(bytes, offset, conformant_count) || conformant_count != arg_11_member_1 ||
                         conformant_count > (bytes.size() - offset - sizeof(uint64_t)) / 8)
                     {
                         return false;
                     }
                     offset += sizeof(uint64_t) + static_cast<size_t>(conformant_count) * 8;
                 }
-                else if (nested_count != 0)
+                else if (arg_11_member_1 != 0)
                 {
                     return false;
                 }
@@ -403,21 +403,21 @@ namespace sogen
                 writer.write<uint64_t>(0);
                 writer.write<uint64_t>(0);
                 writer.write<uint32_t>(api);
-                writer.write<uint32_t>(0);
+                writer.align_to(8);
                 writer.write<uint64_t>(0);
                 writer.write<uint64_t>(package_id);
                 writer.write<uint64_t>(0);
                 writer.write<uint16_t>(0x58);
                 writer.write<uint16_t>(0x5a);
-                writer.write<uint32_t>(0);
+                writer.align_to(8);
                 writer.write<uint64_t>(this->package_strings_);
                 writer.write<uint16_t>(0x32);
                 writer.write<uint16_t>(0x34);
-                writer.write<uint32_t>(0);
+                writer.align_to(8);
                 writer.write<uint64_t>(this->package_strings_ + 0x5a);
                 writer.write<uint16_t>(0x40);
                 writer.write<uint16_t>(0x42);
-                writer.write<uint32_t>(0);
+                writer.align_to(8);
                 writer.write<uint64_t>(this->package_strings_ + 0x8e);
                 writer.write<uint32_t>(1);
                 writer.write<uint32_t>(0x004107b3);
