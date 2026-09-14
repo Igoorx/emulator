@@ -246,6 +246,7 @@ namespace sogen
         NTSTATUS status{};
         std::optional<std::vector<uint8_t>> payload{};
         std::vector<alpc_reply_handle> handles{};
+        std::vector<uint8_t> view_payload{};
 
         lpc_request_result() = default;
 
@@ -273,6 +274,7 @@ namespace sogen
         lpc_port_message message{};
         std::vector<uint8_t> payload{};
         std::vector<alpc_reply_handle> handles{};
+        std::vector<uint8_t> view_payload{};
 
         [[nodiscard]] ULONG total_length() const
         {
@@ -290,6 +292,7 @@ namespace sogen
             buffer.write(message);
             buffer.write_vector(payload);
             buffer.write_vector(handles);
+            buffer.write_vector(view_payload);
         }
 
         void deserialize(utils::buffer_deserializer& buffer)
@@ -298,6 +301,7 @@ namespace sogen
             buffer.read(message);
             buffer.read_vector(payload);
             buffer.read_vector(handles);
+            buffer.read_vector(view_payload);
         }
     };
 
