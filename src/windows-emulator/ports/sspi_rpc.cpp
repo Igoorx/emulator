@@ -4,6 +4,8 @@
 #include "binary_writer.hpp"
 #include "../windows_emulator.hpp"
 
+#include <utils/io.hpp>
+
 namespace sogen
 {
 
@@ -184,6 +186,17 @@ namespace sogen
                 writer.align_to(8);
                 writer.write<int32_t>(0);
                 writer.align_to(8);
+            }
+
+            static std::optional<std::vector<std::byte>> read_final_context(windows_emulator& win_emu)
+            {
+                auto context =
+                    utils::io::read_file(win_emu.file_sys.translate(R"(C:\fixture\sspi\isc_0006_output_context.bin)"));
+                if (context.size() != 5096)
+                {
+                    return std::nullopt;
+                }
+                return context;
             }
 
             static bool valid_complete_tls_records(const std::span<const uint8_t> data)
@@ -538,6 +551,37 @@ namespace sogen
                 finish_reply(writer, start, reply_size);
             }
 
+            static bool write_final_context_reply(utils::aligned_binary_writer& writer, const std::span<const std::byte> provider_context,
+                                                  const security_handle context)
+            {
+                const auto start = writer.offset();
+                writer.write<uint32_t>(0x2000);
+                writer.align_to(8);
+                writer.write<uint32_t>(0);
+                writer.write<uint32_t>(1);
+                writer.write_pointer_sized(0x20000);
+                writer.write_pointer_sized(1);
+                writer.write<uint32_t>(0);
+                writer.write<uint32_t>(2);
+                writer.write_pointer_sized(0);
+                writer.write_pointer_sized(0);
+                writer.write<uint32_t>(static_cast<uint32_t>(provider_context.size()));
+                writer.write<uint32_t>(0);
+                writer.write_pointer_sized(0x20000);
+                writer.write_pointer_sized(provider_context.size());
+                writer.write(provider_context.data(), provider_context.size(), 1);
+                writer.align_to(8);
+                writer.write<uint64_t>(context.lower);
+                writer.write<uint64_t>(context.upper);
+                writer.write<uint32_t>(k_context_attributes);
+                writer.align_to(8);
+                writer.write<uint64_t>(k_expiry);
+                writer.write<uint32_t>(0);
+                writer.align_to(8);
+                write_callback_result(writer);
+                return finish_reply(writer, start, 0x1530);
+            }
+
             NTSTATUS handle_process_security_context(windows_emulator& win_emu, const lpc_request_context& c,
                                                      utils::aligned_binary_writer& writer)
             {
@@ -612,15 +656,20 @@ namespace sogen
                     write_context_reply(writer, 0, k_final_handshake_token, 0, 0, this->context_.handle, k_continue_needed, k_expiry,
                                         0x1c8);
                     return STATUS_SUCCESS;
-                case 5:
+                case 5: {
                     if (input.size() != 51 || !valid_complete_tls_records(input))
                     {
                         return STATUS_INVALID_PARAMETER;
                     }
+                    const auto provider_context = read_final_context(win_emu);
+                    if (!provider_context || !write_final_context_reply(writer, *provider_context, this->context_.handle))
+                    {
+                        return STATUS_OBJECT_NAME_NOT_FOUND;
+                    }
                     this->context_.phase = 6;
                     this->context_.finalized = true;
-                    write_context_reply(writer, 0, {}, 0, 0, this->context_.handle, 0, k_expiry, 0x140);
                     return STATUS_SUCCESS;
+                }
                 default:
                     return STATUS_INVALID_PARAMETER;
                 }
