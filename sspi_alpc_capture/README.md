@@ -1,10 +1,11 @@
 # SSPI ALPC capture utility
 
-This is a standalone Windows x64 diagnostic executable. It patches only the
-`rpcrt4.dll` import-address-table entries for
-`ntdll.dll!NtAlpcConnectPortEx` and
-`ntdll.dll!NtAlpcSendWaitReceivePort` in its own process. It does not inject,
-patch LSASS, or modify Sogen.
+This is a standalone Windows x64 diagnostic executable. It patches the
+`rpcrt4.dll` import-address-table entries used for ALPC and installs
+process-local hooks on the three native system-call stubs used to open, control,
+and close `\Device\KsecDD` and `\Device\CNG`. Installing the native hooks before
+loading the cryptography providers captures their initialization traffic. It
+does not inject, patch LSASS, or modify Sogen.
 
 The utility calls the public SSPI entry points using the exact package name
 `Microsoft Unified Security Protocol Provider`, captures the ALPC traffic on
@@ -72,6 +73,23 @@ message or view is limited to 1 MiB, receive lengths are checked against the
 pre-call capacity, and memory copies are guarded with structured exception
 handling.
 
+KsecDD and CNG requests are recorded separately:
+
+```text
+capture\device_io.jsonl
+capture\device_0001_ksecdd_input.bin
+capture\device_0001_ksecdd_output.bin
+capture\device_0002_cng_input.bin
+capture\device_0002_cng_output.bin
+```
+
+Each metadata row records the device, handle, IOCTL, native return status,
+`IO_STATUS_BLOCK` completion status and byte count, input/output capacities,
+and the names of captured buffers. Inputs are copied before the call and
+completed outputs after it. An operation that returns `STATUS_PENDING` is
+recorded, but its output is marked unavailable because completion occurs after
+the native hook returns.
+
 The deterministic lifecycle fixture is organized separately:
 
 ```text
@@ -104,6 +122,8 @@ Other files:
 - `connect.json`: connect status, handle, lengths, and capture diagnostics.
 - `environment.json`: Windows build, process architecture/PID, and module
   paths, bases, and file versions.
+- `device_io.jsonl`: one metadata object per observed KsecDD or CNG device
+  control call.
 
 The ALPC hook assigns sequence numbers at entry. In a multithreaded run,
 completion and console lines can occur in a different order, but
@@ -111,12 +131,15 @@ completion and console lines can occur in a different order, but
 
 ## Failure behavior
 
-Both required imports must be found in `rpcrt4.dll`'s normal or delay-import
-tables. The utility reports which tables/descriptors were seen and exits if
-either hook cannot be installed. It intentionally has no inline-hook fallback.
-Any DNS, TCP, SSPI, encryption, or decryption failure is reported with its
-exact status and produces a nonzero exit code after available artifacts and
-cleanup events are written.
+The two required ALPC imports must be found in `rpcrt4.dll`'s normal or
+delay-import tables. Device capture requires the standard x64
+`NtOpenFile`, `NtDeviceIoControlFile`, and `NtClose` syscall-stub prologues and
+an executable relay allocation within relative-jump range. The utility reports
+setup failures and exits rather than silently producing an incomplete capture.
+The ALPC hooks intentionally have no inline-hook fallback. Any DNS, TCP, SSPI,
+encryption, or decryption failure is reported with its exact status and
+produces a nonzero exit code after available artifacts and cleanup events are
+written.
 
 No RPC/NDR decoding is attempted. The dumps preserve the outer ALPC messages
 and payloads for later analysis.

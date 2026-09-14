@@ -4,7 +4,7 @@
 #include "capture.hpp"
 #include "iat_hook.hpp"
 
-#include <Windows.h>
+#include <windows.h>
 #include <security.h>
 
 #include <algorithm>
@@ -547,6 +547,39 @@ int main()
     }
     capture::RealNtAlpcSendWaitReceivePort = reinterpret_cast<capture::NtAlpcSendWaitReceivePortFn>(sendHook.callable_original);
 
+    if (!capture::StartDeviceCapture(error))
+    {
+        std::string restoreSendError;
+        std::string restoreConnectError;
+        iat::RestoreImports(sendHook, &restoreSendError);
+        iat::RestoreImports(connectHook, &restoreConnectError);
+        std::cerr << "[FATAL] device capture hooks could not be installed: " << error << "\n";
+        return 5;
+    }
+
+    HMODULE bcrypt = LoadLibraryW(L"bcrypt.dll");
+    HMODULE bcryptPrimitives = LoadLibraryW(L"bcryptprimitives.dll");
+    if (!bcrypt || !bcryptPrimitives)
+    {
+        const DWORD loadError = GetLastError();
+        if (bcryptPrimitives)
+        {
+            FreeLibrary(bcryptPrimitives);
+        }
+        if (bcrypt)
+        {
+            FreeLibrary(bcrypt);
+        }
+        std::string deviceRestoreError;
+        std::string restoreSendError;
+        std::string restoreConnectError;
+        capture::StopDeviceCapture(deviceRestoreError);
+        iat::RestoreImports(sendHook, &restoreSendError);
+        iat::RestoreImports(connectHook, &restoreConnectError);
+        std::cerr << "[FATAL] cryptography providers could not be preloaded, Win32 error " << loadError << "\n";
+        return 5;
+    }
+
     Lifecycle lifecycle;
     NetworkState network;
     WSADATA winsock{};
@@ -981,6 +1014,19 @@ int main()
         lifecycle.Add("{\"event\":\"WSACleanup\"}");
     }
 
+    FreeLibrary(bcryptPrimitives);
+    FreeLibrary(bcrypt);
+
+    std::string deviceRestoreError;
+    if (!capture::StopDeviceCapture(deviceRestoreError))
+    {
+        std::cerr << "[WARN] one or more device-capture hooks could not be restored cleanly: " << deviceRestoreError << "\n";
+        if (exitCode == 0)
+        {
+            exitCode = 6;
+        }
+    }
+
     std::string restoreError1;
     std::string restoreError2;
     const bool restoreSend = iat::RestoreImports(sendHook, &restoreError1);
@@ -1007,7 +1053,8 @@ int main()
     }
     lifecycle.Add("{\"event\":\"capture_complete\",\"network_sent\":" + std::to_string(network.sentBytes) + ",\"network_received\":" +
                   std::to_string(network.receivedBytes) + ",\"alpc_transactions\":" + std::to_string(capture::TransactionCount()) +
-                  ",\"exit_code\":" + std::to_string(exitCode) + "}");
+                  ",\"device_io_transactions\":" + std::to_string(capture::DeviceIoCount()) + ",\"exit_code\":" + std::to_string(exitCode) +
+                  "}");
     if (!lifecycle.Write(output, error))
     {
         std::cerr << "[ERROR] " << error << "\n";
@@ -1016,9 +1063,11 @@ int main()
 
     std::cout << "\nCapture complete:\n"
               << "    capture/capture.jsonl\n"
+              << "    capture/device_io.jsonl\n"
               << "    capture/lifecycle.jsonl\n"
               << "    network sent " << network.sentBytes << " bytes, received " << network.receivedBytes << " bytes\n"
-              << "    " << capture::TransactionCount() << " lsasspirpc transaction(s)\n";
+              << "    " << capture::TransactionCount() << " lsasspirpc transaction(s)\n"
+              << "    " << capture::DeviceIoCount() << " KsecDD/CNG device I/O transaction(s)\n";
     if (capture::SspiPortHandle.load() == 0)
     {
         std::cerr << "[WARN] no successful connection to \\RPC Control\\lsasspirpc "

@@ -10,6 +10,7 @@
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <unordered_map>
 #include <vector>
 
 namespace capture
@@ -19,6 +20,23 @@ namespace capture
 
         constexpr size_t kMaxCapture = 1024u * 1024u;
         constexpr wchar_t kTargetPort[] = L"\\RPC Control\\lsasspirpc";
+        constexpr wchar_t kKsecDdDevice[] = L"\\Device\\KsecDD";
+        constexpr wchar_t kCngDevice[] = L"\\Device\\CNG";
+        constexpr NTSTATUS kStatusPending = 0x00000103L;
+
+        enum class DeviceKind
+        {
+            ksecdd,
+            cng,
+        };
+
+        struct InlineHook
+        {
+            void* target = nullptr;
+            void* allocation = nullptr;
+            uint8_t original[8]{};
+            bool installed = false;
+        };
 
         thread_local bool g_insideHook = false;
 
@@ -77,6 +95,32 @@ namespace capture
             AttributeSnapshot receive_attributes;
         };
 
+        struct ByteSnapshot
+        {
+            bool present = false;
+            bool captured = false;
+            ULONG capacity = 0;
+            size_t size = 0;
+            std::string error;
+            std::vector<uint8_t> bytes;
+        };
+
+        struct DeviceTransaction
+        {
+            uint64_t seq = 0;
+            DWORD threadId = 0;
+            DeviceKind device = DeviceKind::ksecdd;
+            uintptr_t handle = 0;
+            uintptr_t event = 0;
+            ULONG ioctl = 0;
+            NTSTATUS status = 0;
+            bool ioStatusReadable = false;
+            NTSTATUS completionStatus = 0;
+            uintptr_t information = 0;
+            ByteSnapshot input;
+            ByteSnapshot output;
+        };
+
         struct ConnectRecord
         {
             bool available = false;
@@ -102,6 +146,12 @@ namespace capture
         std::mutex g_recordsMutex;
         std::vector<Transaction> g_transactions;
         ConnectRecord g_connect;
+        std::atomic<uint64_t> g_nextDeviceSequence{0};
+        std::vector<DeviceTransaction> g_deviceTransactions;
+        std::unordered_map<uintptr_t, DeviceKind> g_deviceHandles;
+        InlineHook g_openFileHook;
+        InlineHook g_deviceIoHook;
+        InlineHook g_closeHook;
 
         // Isolated from C++ object lifetime management because MSVC does not permit
         // __try in a function that requires C++ unwinding.
@@ -290,6 +340,157 @@ namespace capture
             return CompareStringOrdinal(name.data(), static_cast<int>(name.size()), kTargetPort, -1, TRUE) == CSTR_EQUAL;
         }
 
+        std::optional<DeviceKind> DeviceKindFromName(const std::wstring& name) noexcept
+        {
+            if (CompareStringOrdinal(name.data(), static_cast<int>(name.size()), kKsecDdDevice, -1, TRUE) == CSTR_EQUAL)
+            {
+                return DeviceKind::ksecdd;
+            }
+            if (CompareStringOrdinal(name.data(), static_cast<int>(name.size()), kCngDevice, -1, TRUE) == CSTR_EQUAL)
+            {
+                return DeviceKind::cng;
+            }
+            return std::nullopt;
+        }
+
+        const char* DeviceName(DeviceKind device) noexcept
+        {
+            return device == DeviceKind::ksecdd ? "ksecdd" : "cng";
+        }
+
+        void WriteAbsoluteJump(uint8_t* destination, const void* target) noexcept
+        {
+            destination[0] = 0xFF;
+            destination[1] = 0x25;
+            std::memset(destination + 2, 0, sizeof(uint32_t));
+            std::memcpy(destination + 6, &target, sizeof(target));
+        }
+
+        void* AllocateNear(const void* target)
+        {
+            SYSTEM_INFO info{};
+            GetSystemInfo(&info);
+            const uintptr_t address = reinterpret_cast<uintptr_t>(target);
+            const uintptr_t granularity = info.dwAllocationGranularity;
+            const uintptr_t aligned = address & ~(granularity - 1);
+            constexpr uintptr_t maxDistance = 0x70000000;
+            for (uintptr_t distance = granularity; distance <= maxDistance; distance += granularity)
+            {
+                if (aligned >= distance)
+                {
+                    if (void* allocation =
+                            VirtualAlloc(reinterpret_cast<void*>(aligned - distance), 64, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE))
+                    {
+                        return allocation;
+                    }
+                }
+                if (aligned <= UINTPTR_MAX - distance)
+                {
+                    if (void* allocation =
+                            VirtualAlloc(reinterpret_cast<void*>(aligned + distance), 64, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE))
+                    {
+                        return allocation;
+                    }
+                }
+            }
+            return nullptr;
+        }
+
+        template <typename Function>
+        bool InstallInlineHook(void* target, void* replacement, InlineHook& hook, Function& callableOriginal, std::string& error)
+        {
+            constexpr uint8_t expectedPrefix[] = {0x4C, 0x8B, 0xD1, 0xB8};
+            if (std::memcmp(target, expectedPrefix, sizeof(expectedPrefix)) != 0)
+            {
+                error = "native syscall stub has an unsupported prologue";
+                return false;
+            }
+
+            auto* allocation = static_cast<uint8_t*>(AllocateNear(target));
+            if (!allocation)
+            {
+                error = "cannot allocate an executable relay within 2 GiB of ntdll.dll";
+                return false;
+            }
+
+            auto* relay = allocation;
+            auto* trampoline = allocation + 16;
+            WriteAbsoluteJump(relay, replacement);
+            std::memcpy(hook.original, target, sizeof(hook.original));
+            std::memcpy(trampoline, hook.original, sizeof(hook.original));
+            const auto* continuation = static_cast<const uint8_t*>(target) + sizeof(hook.original);
+            WriteAbsoluteJump(trampoline + sizeof(hook.original), continuation);
+
+            DWORD allocationProtection = 0;
+            if (!VirtualProtect(allocation, 64, PAGE_EXECUTE_READ, &allocationProtection))
+            {
+                VirtualFree(allocation, 0, MEM_RELEASE);
+                error = "cannot mark the native-hook relay executable";
+                return false;
+            }
+
+            const intptr_t displacement = reinterpret_cast<intptr_t>(relay) - (reinterpret_cast<intptr_t>(target) + 5);
+            if (displacement < INT32_MIN || displacement > INT32_MAX)
+            {
+                VirtualFree(allocation, 0, MEM_RELEASE);
+                error = "native-hook relay is outside rel32 range";
+                return false;
+            }
+
+            callableOriginal = reinterpret_cast<Function>(trampoline);
+            DWORD oldProtection = 0;
+            if (!VirtualProtect(target, sizeof(hook.original), PAGE_EXECUTE_READWRITE, &oldProtection))
+            {
+                callableOriginal = nullptr;
+                VirtualFree(allocation, 0, MEM_RELEASE);
+                error = "cannot make the native syscall stub writable";
+                return false;
+            }
+            auto* patch = static_cast<uint8_t*>(target);
+            patch[0] = 0xE9;
+            const int32_t relative = static_cast<int32_t>(displacement);
+            std::memcpy(patch + 1, &relative, sizeof(relative));
+            std::memset(patch + 5, 0x90, sizeof(hook.original) - 5);
+            DWORD ignored = 0;
+            hook.target = target;
+            hook.allocation = allocation;
+            hook.installed = true;
+            const BOOL protectionRestored = VirtualProtect(target, sizeof(hook.original), oldProtection, &ignored);
+            FlushInstructionCache(GetCurrentProcess(), target, sizeof(hook.original));
+            if (!protectionRestored)
+            {
+                error = "native syscall hook installed but page protection could not be restored";
+                return false;
+            }
+            return true;
+        }
+
+        bool RemoveInlineHook(InlineHook& hook, std::string& error)
+        {
+            if (!hook.installed)
+            {
+                return true;
+            }
+            DWORD oldProtection = 0;
+            if (!VirtualProtect(hook.target, sizeof(hook.original), PAGE_EXECUTE_READWRITE, &oldProtection))
+            {
+                error = "cannot make the native syscall stub writable during restoration";
+                return false;
+            }
+            std::memcpy(hook.target, hook.original, sizeof(hook.original));
+            DWORD ignored = 0;
+            const BOOL protectionRestored = VirtualProtect(hook.target, sizeof(hook.original), oldProtection, &ignored);
+            FlushInstructionCache(GetCurrentProcess(), hook.target, sizeof(hook.original));
+            const BOOL allocationReleased = VirtualFree(hook.allocation, 0, MEM_RELEASE);
+            hook = {};
+            if (!protectionRestored || !allocationReleased)
+            {
+                error = "native syscall hook restoration was incomplete";
+                return false;
+            }
+            return true;
+        }
+
         std::string NarrowUtf8(const std::wstring& text)
         {
             if (text.empty())
@@ -339,6 +540,13 @@ namespace capture
         {
             std::ostringstream os;
             os << std::setfill('0') << std::setw(4) << seq << suffix;
+            return os.str();
+        }
+
+        std::string DeviceFileName(uint64_t seq, DeviceKind device, const char* suffix)
+        {
+            std::ostringstream os;
+            os << "device_" << std::setfill('0') << std::setw(4) << seq << '_' << DeviceName(device) << suffix;
             return os.str();
         }
 
@@ -409,11 +617,259 @@ namespace capture
             os << '}';
         }
 
+        ByteSnapshot CaptureByteBuffer(const void* buffer, ULONG capacity, size_t size)
+        {
+            ByteSnapshot snap;
+            snap.present = buffer != nullptr || capacity != 0;
+            snap.capacity = capacity;
+            snap.size = size;
+            if (size > capacity)
+            {
+                snap.error = "reported byte count exceeds buffer capacity";
+                return snap;
+            }
+            if (size == 0)
+            {
+                snap.captured = true;
+                return snap;
+            }
+            snap.captured = SafeBytes(buffer, size, snap.bytes, snap.error);
+            return snap;
+        }
+
+        void WriteByteSnapshotJson(std::ostream& os, const ByteSnapshot& snap, const std::string& fileName)
+        {
+            os << "{\"present\":" << (snap.present ? "true" : "false") << ",\"capacity\":" << snap.capacity << ",\"size\":" << snap.size
+               << ",\"captured\":" << (snap.captured ? "true" : "false");
+            if (snap.captured && !snap.bytes.empty())
+            {
+                os << ",\"file\":\"" << fileName << "\"";
+            }
+            if (!snap.error.empty())
+            {
+                os << ",\"error\":\"" << JsonEscape(snap.error) << "\"";
+            }
+            os << '}';
+        }
+
     } // namespace
 
     NtAlpcConnectPortExFn RealNtAlpcConnectPortEx = nullptr;
     NtAlpcSendWaitReceivePortFn RealNtAlpcSendWaitReceivePort = nullptr;
     std::atomic<uintptr_t> SspiPortHandle{0};
+    NtOpenFileFn RealNtOpenFile = nullptr;
+    NtDeviceIoControlFileFn RealNtDeviceIoControlFile = nullptr;
+    NtCloseFn RealNtClose = nullptr;
+
+    NTSTATUS NTAPI HookNtOpenFile(PHANDLE FileHandle, ACCESS_MASK DesiredAccess, POBJECT_ATTRIBUTES ObjectAttributes,
+                                  PIO_STATUS_BLOCK IoStatusBlock, ULONG ShareAccess, ULONG OpenOptions)
+    {
+        if (!RealNtOpenFile)
+        {
+            return static_cast<NTSTATUS>(0xC0000002L);
+        }
+        if (g_insideHook)
+        {
+            return RealNtOpenFile(FileHandle, DesiredAccess, ObjectAttributes, IoStatusBlock, ShareAccess, OpenOptions);
+        }
+
+        std::wstring name;
+        const auto device = SafeReadUnicodeName(ObjectAttributes, name) ? DeviceKindFromName(name) : std::nullopt;
+        HookGuard guard;
+        const NTSTATUS status = RealNtOpenFile(FileHandle, DesiredAccess, ObjectAttributes, IoStatusBlock, ShareAccess, OpenOptions);
+        if (status >= 0 && device)
+        {
+            HANDLE handle = nullptr;
+            if (SafeRead(FileHandle, handle))
+            {
+                try
+                {
+                    std::lock_guard lock(g_recordsMutex);
+                    g_deviceHandles[reinterpret_cast<uintptr_t>(handle)] = *device;
+                }
+                catch (...)
+                {
+                    g_captureFailures.fetch_add(1, std::memory_order_relaxed);
+                }
+                std::printf("[DEVICE] opened %s handle %p\n", DeviceName(*device), handle);
+            }
+        }
+        return status;
+    }
+
+    NTSTATUS NTAPI HookNtDeviceIoControlFile(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRoutine, PVOID ApcContext,
+                                             PIO_STATUS_BLOCK IoStatusBlock, ULONG IoControlCode, PVOID InputBuffer,
+                                             ULONG InputBufferLength, PVOID OutputBuffer, ULONG OutputBufferLength)
+    {
+        if (!RealNtDeviceIoControlFile)
+        {
+            return static_cast<NTSTATUS>(0xC0000002L);
+        }
+
+        std::optional<DeviceKind> device;
+        if (!g_insideHook)
+        {
+            std::lock_guard lock(g_recordsMutex);
+            const auto it = g_deviceHandles.find(reinterpret_cast<uintptr_t>(FileHandle));
+            if (it != g_deviceHandles.end())
+            {
+                device = it->second;
+            }
+        }
+        if (!device)
+        {
+            return RealNtDeviceIoControlFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock, IoControlCode, InputBuffer,
+                                             InputBufferLength, OutputBuffer, OutputBufferLength);
+        }
+
+        HookGuard guard;
+        DeviceTransaction tx;
+        tx.seq = g_nextDeviceSequence.fetch_add(1, std::memory_order_relaxed) + 1;
+        tx.threadId = GetCurrentThreadId();
+        tx.device = *device;
+        tx.handle = reinterpret_cast<uintptr_t>(FileHandle);
+        tx.event = reinterpret_cast<uintptr_t>(Event);
+        tx.ioctl = IoControlCode;
+        try
+        {
+            tx.input = CaptureByteBuffer(InputBuffer, InputBufferLength, InputBufferLength);
+        }
+        catch (...)
+        {
+            tx.input.present = InputBuffer != nullptr || InputBufferLength != 0;
+            tx.input.capacity = InputBufferLength;
+            tx.input.error = "C++ exception while capturing input buffer";
+        }
+
+        tx.status = RealNtDeviceIoControlFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock, IoControlCode, InputBuffer,
+                                              InputBufferLength, OutputBuffer, OutputBufferLength);
+        const NTSTATUS returnStatus = tx.status;
+
+        IO_STATUS_BLOCK ioStatus{};
+        tx.ioStatusReadable = SafeRead(IoStatusBlock, ioStatus);
+        if (tx.ioStatusReadable)
+        {
+            tx.completionStatus = ioStatus.Status;
+            tx.information = ioStatus.Information;
+        }
+        try
+        {
+            const size_t outputSize = tx.status != kStatusPending ? OutputBufferLength : 0;
+            tx.output = CaptureByteBuffer(OutputBuffer, OutputBufferLength, outputSize);
+            if (tx.status == kStatusPending)
+            {
+                tx.output.captured = false;
+                tx.output.error = "operation returned STATUS_PENDING; output was not complete at hook return";
+            }
+        }
+        catch (...)
+        {
+            tx.output.present = OutputBuffer != nullptr || OutputBufferLength != 0;
+            tx.output.capacity = OutputBufferLength;
+            tx.output.error = "C++ exception while capturing output buffer";
+        }
+
+        std::printf("[DEVICE #%llu] %s ioctl = 0x%08lX  input = %zu bytes  output = %zu bytes  status = 0x%08lX\n",
+                    static_cast<unsigned long long>(tx.seq), DeviceName(tx.device), static_cast<unsigned long>(tx.ioctl),
+                    tx.input.bytes.size(), tx.output.bytes.size(), static_cast<unsigned long>(tx.status));
+        try
+        {
+            std::lock_guard lock(g_recordsMutex);
+            g_deviceTransactions.push_back(std::move(tx));
+        }
+        catch (...)
+        {
+            g_captureFailures.fetch_add(1, std::memory_order_relaxed);
+        }
+        return returnStatus;
+    }
+
+    NTSTATUS NTAPI HookNtClose(HANDLE Handle)
+    {
+        if (!RealNtClose)
+        {
+            return static_cast<NTSTATUS>(0xC0000002L);
+        }
+        if (g_insideHook)
+        {
+            return RealNtClose(Handle);
+        }
+        HookGuard guard;
+        const NTSTATUS status = RealNtClose(Handle);
+        if (status >= 0)
+        {
+            std::lock_guard lock(g_recordsMutex);
+            g_deviceHandles.erase(reinterpret_cast<uintptr_t>(Handle));
+        }
+        return status;
+    }
+
+    bool StartDeviceCapture(std::string& error)
+    {
+        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        void* openFile = reinterpret_cast<void*>(GetProcAddress(ntdll, "NtOpenFile"));
+        void* deviceIo = reinterpret_cast<void*>(GetProcAddress(ntdll, "NtDeviceIoControlFile"));
+        void* close = reinterpret_cast<void*>(GetProcAddress(ntdll, "NtClose"));
+        if (!openFile || !deviceIo || !close)
+        {
+            error = "required native device-capture exports are absent from ntdll.dll";
+            return false;
+        }
+
+        if (!InstallInlineHook(openFile, reinterpret_cast<void*>(&HookNtOpenFile), g_openFileHook, RealNtOpenFile, error) ||
+            !InstallInlineHook(deviceIo, reinterpret_cast<void*>(&HookNtDeviceIoControlFile), g_deviceIoHook, RealNtDeviceIoControlFile,
+                               error) ||
+            !InstallInlineHook(close, reinterpret_cast<void*>(&HookNtClose), g_closeHook, RealNtClose, error))
+        {
+            const std::string setupError = error;
+            std::string restoreError;
+            StopDeviceCapture(restoreError);
+            error = setupError;
+            if (!restoreError.empty())
+            {
+                error += "; cleanup: " + restoreError;
+            }
+            return false;
+        }
+        return true;
+    }
+
+    bool StopDeviceCapture(std::string& error)
+    {
+        bool ok = true;
+        std::string hookError;
+        if (!RemoveInlineHook(g_closeHook, hookError))
+        {
+            error = hookError;
+            ok = false;
+        }
+        if (!RemoveInlineHook(g_deviceIoHook, hookError))
+        {
+            error = hookError;
+            ok = false;
+        }
+        if (!RemoveInlineHook(g_openFileHook, hookError))
+        {
+            error = hookError;
+            ok = false;
+        }
+        if (!g_closeHook.installed && !g_deviceIoHook.installed && !g_openFileHook.installed)
+        {
+            RealNtClose = nullptr;
+            RealNtDeviceIoControlFile = nullptr;
+            RealNtOpenFile = nullptr;
+        }
+        {
+            std::lock_guard lock(g_recordsMutex);
+            g_deviceHandles.clear();
+        }
+        return ok;
+    }
+
+    uint64_t DeviceIoCount() noexcept
+    {
+        return g_nextDeviceSequence.load(std::memory_order_relaxed);
+    }
 
     NTSTATUS NTAPI HookNtAlpcConnectPortEx(PHANDLE PortHandle, POBJECT_ATTRIBUTES ConnectionPortObjectAttributes,
                                            POBJECT_ATTRIBUTES ClientPortObjectAttributes, PNativeAlpcPortAttributes PortAttributes,
@@ -630,12 +1086,16 @@ namespace capture
     {
         std::vector<Transaction> transactions;
         ConnectRecord connect;
+        std::vector<DeviceTransaction> deviceTransactions;
         {
             std::lock_guard lock(g_recordsMutex);
             transactions = g_transactions;
             connect = g_connect;
+            deviceTransactions = g_deviceTransactions;
         }
         std::sort(transactions.begin(), transactions.end(), [](const Transaction& a, const Transaction& b) { return a.seq < b.seq; });
+        std::sort(deviceTransactions.begin(), deviceTransactions.end(),
+                  [](const DeviceTransaction& a, const DeviceTransaction& b) { return a.seq < b.seq; });
 
         if (connect.available)
         {
@@ -730,6 +1190,45 @@ namespace capture
         if (!jsonl)
         {
             error = "write failed for capture.jsonl";
+            return false;
+        }
+
+        std::ofstream deviceJsonl(directory / "device_io.jsonl", std::ios::trunc);
+        if (!deviceJsonl)
+        {
+            error = "cannot create device_io.jsonl";
+            return false;
+        }
+        for (const auto& tx : deviceTransactions)
+        {
+            const std::string inputName = DeviceFileName(tx.seq, tx.device, "_input.bin");
+            const std::string outputName = DeviceFileName(tx.seq, tx.device, "_output.bin");
+            if (tx.input.captured && !tx.input.bytes.empty() && !WriteBinary(directory / inputName, tx.input.bytes, error))
+            {
+                return false;
+            }
+            if (tx.output.captured && !tx.output.bytes.empty() && !WriteBinary(directory / outputName, tx.output.bytes, error))
+            {
+                return false;
+            }
+
+            deviceJsonl << "{\"seq\":" << tx.seq << ",\"thread_id\":" << tx.threadId << ",\"device\":\"" << DeviceName(tx.device)
+                        << "\",\"handle\":\"" << HexPointer(tx.handle) << "\",\"event\":\"" << HexPointer(tx.event) << "\",\"ioctl\":\""
+                        << HexPointer(tx.ioctl) << "\",\"status\":\"" << HexStatus(tx.status)
+                        << "\",\"io_status_readable\":" << (tx.ioStatusReadable ? "true" : "false");
+            if (tx.ioStatusReadable)
+            {
+                deviceJsonl << ",\"completion_status\":\"" << HexStatus(tx.completionStatus) << "\",\"information\":" << tx.information;
+            }
+            deviceJsonl << ",\"input\":";
+            WriteByteSnapshotJson(deviceJsonl, tx.input, inputName);
+            deviceJsonl << ",\"output\":";
+            WriteByteSnapshotJson(deviceJsonl, tx.output, outputName);
+            deviceJsonl << "}\n";
+        }
+        if (!deviceJsonl)
+        {
+            error = "write failed for device_io.jsonl";
             return false;
         }
         if (g_captureFailures.load(std::memory_order_relaxed) != 0)
