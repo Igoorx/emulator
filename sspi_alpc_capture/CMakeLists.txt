@@ -11,6 +11,7 @@ endif()
 
 add_executable(sspi_alpc_capture
   main.cpp
+  ksecdd_provider_probe.cpp
   iat_hook.cpp
   capture.cpp
 )

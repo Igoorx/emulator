@@ -119,6 +119,8 @@ CALL :collect msvcrt.dll
 CALL :collect mswsock.dll
 CALL :collect napinsp.dll
 CALL :collect ncrypt.dll
+CALL :collect ncryptprov.dll
+CALL :collect ncryptsslp.dll
 CALL :collect netapi32.dll
 CALL :collect netmsg.dll
 CALL :collect netutils.dll
@@ -144,6 +146,7 @@ CALL :collect rstrtmgr.dll
 CALL :collect rsaenh.dll
 CALL :collect schannel.dll
 CALL :collect sechost.dll
+CALL :collect secur32.dll
 CALL :collect setupapi.dll
 CALL :collect shcore.dll
 CALL :collect shell32.dll

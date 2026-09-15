@@ -3,6 +3,7 @@
 
 #include "capture.hpp"
 #include "iat_hook.hpp"
+#include "ksecdd_provider_probe.hpp"
 
 #include <windows.h>
 #include <security.h>
@@ -580,6 +581,17 @@ int main()
         return 5;
     }
 
+    std::cout << "[PROBE] capturing DSA, RSA, provider enumeration, and key storage from KsecDD\n";
+    const bool providerProbeSucceeded = RunKsecDdProviderProbe(error);
+    if (providerProbeSucceeded)
+    {
+        std::cout << "[PROBE] KsecDD provider responses captured\n";
+    }
+    else
+    {
+        std::cerr << "[ERROR] KsecDD provider probe failed: " << error << "\n";
+    }
+
     Lifecycle lifecycle;
     NetworkState network;
     WSADATA winsock{};
@@ -589,10 +601,14 @@ int main()
     TimeStamp expiry{};
     bool credentialCreated = false;
     bool contextCreated = false;
-    int exitCode = 0;
+    int exitCode = providerProbeSucceeded ? 0 : 6;
 
     do
     {
+        if (!providerProbeSucceeded)
+        {
+            break;
+        }
         if (WSAStartup(MAKEWORD(2, 2), &winsock) != 0)
         {
             error = "WSAStartup failed: " + std::to_string(WSAGetLastError());
