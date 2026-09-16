@@ -1,10 +1,10 @@
 #include "../std_include.hpp"
 #include "sspi_rpc.hpp"
+#include "sspi_context.hpp"
+#include "sspi_tls_client.hpp"
 
 #include "binary_writer.hpp"
 #include "../windows_emulator.hpp"
-
-#include <utils/io.hpp>
 
 namespace sogen
 {
@@ -25,41 +25,8 @@ namespace sogen
         constexpr uint32_t k_context_attributes = 0x0000c11c;
         constexpr uint32_t k_continue_needed = 0x00090312;
         constexpr uint32_t k_incomplete_message = 0x80090318;
-        constexpr uint32_t k_serialized_packed_context = 1;
-        constexpr uint32_t k_serialized_read_key = 2;
-        constexpr uint32_t k_serialized_write_key = 3;
-        constexpr uint32_t k_serialized_provider_name = 9;
-        constexpr uint32_t k_serialized_unique_binding = 0x0b;
-        constexpr uint32_t k_serialized_certificate_store = 0x15;
-        constexpr size_t k_ssl3_wrapper_size = 80;
-        constexpr size_t k_opaque_blob_size = 0x230;
-        constexpr uint32_t k_opaque_blob_magic = 0x4d53534b;
-        constexpr uint32_t k_opaque_algorithm = 0x00010002;
-        constexpr uint32_t k_opaque_mode = 5;
-        constexpr uint32_t k_opaque_flags = 0x80;
-        constexpr size_t k_aes_128_key_size = 16;
-        constexpr size_t k_aes_schedule_size = 0x150;
-        constexpr size_t k_rebuilt_context_size = 5096;
-        constexpr size_t k_final_context_reply_capacity = 0x1530;
+        constexpr uint32_t k_illegal_message = 0x80090326;
         constexpr uint32_t k_invalid_handle = 0x80090301;
-        constexpr std::array<uint8_t, 148> k_initial_token = {
-            0x16, 0x03, 0x03, 0x00, 0x8f, 0x01, 0x00, 0x00, 0x8b, 0x03, 0x03, 0x6a, 0xa7, 0x3b, 0x2d, 0x38, 0x3e, 0xcd, 0xd3,
-            0x2c, 0xbc, 0xd3, 0xf4, 0x70, 0xf2, 0x21, 0x90, 0x36, 0x8a, 0xa9, 0x76, 0xd5, 0xed, 0xae, 0x01, 0xcc, 0x34, 0x1f,
-            0xe9, 0x04, 0x7c, 0xe1, 0xf5, 0x00, 0x00, 0x10, 0xc0, 0x2c, 0xc0, 0x2b, 0xc0, 0x30, 0xc0, 0x2f, 0xc0, 0x24, 0xc0,
-            0x23, 0xc0, 0x28, 0xc0, 0x27, 0x01, 0x00, 0x00, 0x52, 0x00, 0x00, 0x00, 0x13, 0x00, 0x11, 0x00, 0x00, 0x0e, 0x61,
-            0x70, 0x69, 0x2e, 0x67, 0x69, 0x74, 0x68, 0x75, 0x62, 0x2e, 0x63, 0x6f, 0x6d, 0x00, 0x0a, 0x00, 0x06, 0x00, 0x04,
-            0x00, 0x18, 0x00, 0x17, 0x00, 0x0b, 0x00, 0x02, 0x01, 0x00, 0x00, 0x0d, 0x00, 0x1a, 0x00, 0x18, 0x08, 0x04, 0x08,
-            0x05, 0x08, 0x06, 0x04, 0x01, 0x05, 0x01, 0x02, 0x01, 0x04, 0x03, 0x05, 0x03, 0x02, 0x03, 0x02, 0x02, 0x06, 0x01,
-            0x06, 0x03, 0x00, 0x23, 0x00, 0x00, 0x00, 0x17, 0x00, 0x00, 0xff, 0x01, 0x00, 0x01, 0x00,
-        };
-        constexpr std::array<uint8_t, 126> k_final_handshake_token = {
-            0x16, 0x03, 0x03, 0x00, 0x46, 0x10, 0x00, 0x00, 0x42, 0x41, 0x04, 0x26, 0x23, 0xfe, 0xf4, 0xbc, 0x74, 0x6d, 0xf0, 0x73, 0xa2,
-            0xa9, 0xcf, 0x71, 0xf5, 0x1a, 0x58, 0xe5, 0x4f, 0x4d, 0x91, 0x4c, 0xb5, 0x55, 0x16, 0x1b, 0x10, 0xcb, 0x39, 0x10, 0xd5, 0x56,
-            0xa9, 0x93, 0x80, 0xd9, 0x9a, 0x2c, 0x31, 0x86, 0x70, 0xd1, 0x65, 0x3c, 0x48, 0x56, 0xce, 0xd7, 0x82, 0xae, 0x7c, 0xd0, 0xa9,
-            0x74, 0x59, 0x57, 0x0c, 0x0b, 0xd4, 0x6e, 0xa8, 0x3f, 0xd2, 0x3e, 0x9d, 0x14, 0x03, 0x03, 0x00, 0x01, 0x01, 0x16, 0x03, 0x03,
-            0x00, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xa4, 0x31, 0x2d, 0x14, 0x0e, 0xc2, 0x7a, 0xa5, 0x56, 0x00, 0x0b,
-            0xd5, 0x8e, 0x53, 0x83, 0xf7, 0xde, 0x71, 0x8c, 0x84, 0x51, 0xfc, 0x8e, 0x82, 0xcb, 0xd1, 0x8c, 0x8b, 0x9b, 0x57, 0xe1, 0x6e,
-        };
 
         struct sspi_rpc_port : rpc_port
         {
@@ -118,20 +85,6 @@ namespace sogen
                 std::vector<uint8_t> bytes{};
             };
 
-            struct serialized_item_header
-            {
-                uint32_t type{};
-                uint32_t padded_payload_size{};
-                uint32_t payload_size{};
-                uint32_t reserved{};
-            };
-
-            struct serialized_item
-            {
-                serialized_item_header header{};
-                std::span<const uint8_t> payload{};
-            };
-
             struct credential_record
             {
                 security_handle handle{k_credential_lower, k_credential_upper};
@@ -143,8 +96,7 @@ namespace sogen
                 security_handle handle{k_context_lower, k_context_upper};
                 security_handle credential{};
                 std::string target{};
-                std::vector<uint8_t> pending_input{};
-                uint32_t phase{};
+                std::unique_ptr<sspi::tls_client> tls{};
                 bool live{};
                 bool finalized{};
             };
@@ -216,412 +168,6 @@ namespace sogen
                 writer.align_to(8);
                 writer.write<int32_t>(0);
                 writer.align_to(8);
-            }
-
-            // CSslSerializeHelper::SerializeContextWorker and DeserializeContextWorker define this private record envelope.
-            static bool read_serialized_items(const std::span<const uint8_t> bytes, std::array<serialized_item, 7>& items)
-            {
-                struct expected_item
-                {
-                    uint32_t type;
-                    uint32_t padded_payload_size;
-                    uint32_t payload_size;
-                };
-
-                constexpr std::array expected = {
-                    expected_item{k_serialized_packed_context, 200, 0},
-                    expected_item{k_serialized_provider_name, 64, 64},
-                    expected_item{k_serialized_read_key, 640, 640},
-                    expected_item{k_serialized_write_key, 640, 640},
-                    expected_item{k_serialized_certificate_store, 3424, 3417},
-                    expected_item{k_serialized_unique_binding, 16, 12},
-                    expected_item{0, 0, 0},
-                };
-
-                size_t offset = 0;
-                for (size_t index = 0; index < expected.size(); ++index)
-                {
-                    if ((offset & 7) != 0 || offset > bytes.size() || bytes.size() - offset < sizeof(serialized_item_header))
-                    {
-                        return false;
-                    }
-
-                    serialized_item_header header{};
-                    if (!read_value(bytes, offset, header.type) ||
-                        !read_value(bytes, offset + sizeof(uint32_t), header.padded_payload_size) ||
-                        !read_value(bytes, offset + 2 * sizeof(uint32_t), header.payload_size) ||
-                        !read_value(bytes, offset + 3 * sizeof(uint32_t), header.reserved))
-                    {
-                        return false;
-                    }
-
-                    const auto& expected_item = expected[index];
-                    if (header.type != expected_item.type || header.padded_payload_size != expected_item.padded_payload_size ||
-                        header.payload_size != expected_item.payload_size || header.reserved != 0)
-                    {
-                        return false;
-                    }
-
-                    const size_t payload_offset = offset + sizeof(serialized_item_header);
-                    if (header.padded_payload_size > bytes.size() - payload_offset)
-                    {
-                        return false;
-                    }
-
-                    const size_t retained_payload_size =
-                        header.type == k_serialized_packed_context ? header.padded_payload_size : header.payload_size;
-                    if (retained_payload_size > header.padded_payload_size ||
-                        (header.type != k_serialized_packed_context && align_up(header.payload_size, 8) != header.padded_payload_size))
-                    {
-                        return false;
-                    }
-
-                    const auto padded_payload = bytes.subspan(payload_offset, header.padded_payload_size);
-                    if (!std::ranges::all_of(padded_payload.subspan(retained_payload_size), [](const uint8_t value) { return value == 0; }))
-                    {
-                        return false;
-                    }
-
-                    items[index] = {.header = header, .payload = padded_payload.first(retained_payload_size)};
-                    offset = payload_offset + header.padded_payload_size;
-                }
-
-                return offset == bytes.size();
-            }
-
-            static bool validate_packed_context(const std::span<const uint8_t> payload)
-            {
-                constexpr size_t serialization_version_offset = 0x04;
-                constexpr size_t protocol_offset = 0x10;
-                constexpr size_t cipher_suite_offset = 0x14;
-                constexpr size_t read_sequence_offset = 0x30;
-                constexpr size_t write_sequence_offset = 0x38;
-                constexpr uint32_t tls_1_2_client = 0x800;
-                constexpr uint32_t tls_ecdhe_ecdsa_with_aes_128_gcm_sha256 = 0xc02b;
-
-                uint32_t serialization_version{};
-                uint32_t protocol{};
-                uint32_t cipher_suite{};
-                uint64_t read_sequence{};
-                uint64_t write_sequence{};
-                return read_value(payload, serialization_version_offset, serialization_version) &&
-                       read_value(payload, protocol_offset, protocol) && read_value(payload, cipher_suite_offset, cipher_suite) &&
-                       read_value(payload, read_sequence_offset, read_sequence) &&
-                       read_value(payload, write_sequence_offset, write_sequence) && serialization_version == 1 &&
-                       protocol == tls_1_2_client && cipher_suite == tls_ecdhe_ecdsa_with_aes_128_gcm_sha256 && read_sequence == 1 &&
-                       write_sequence == 1;
-            }
-
-            static bool validate_provider_name(const std::span<const uint8_t> payload)
-            {
-                constexpr std::u16string_view expected = u"Microsoft SSL Protocol Provider";
-                return payload.size() == (expected.size() + 1) * sizeof(char16_t) &&
-                       std::memcmp(payload.data(), expected.data(), expected.size() * sizeof(char16_t)) == 0 &&
-                       payload[payload.size() - 2] == 0 && payload[payload.size() - 1] == 0;
-            }
-
-            static uint8_t galois_multiply(uint8_t lhs, uint8_t rhs)
-            {
-                uint8_t result{};
-                for (size_t bit = 0; bit < 8; ++bit)
-                {
-                    if ((rhs & 1) != 0)
-                    {
-                        result ^= lhs;
-                    }
-
-                    const bool high_bit = (lhs & 0x80) != 0;
-                    lhs = static_cast<uint8_t>(lhs << 1);
-                    if (high_bit)
-                    {
-                        lhs ^= 0x1b;
-                    }
-                    rhs >>= 1;
-                }
-                return result;
-            }
-
-            static uint8_t aes_sbox(const uint8_t value)
-            {
-                uint8_t inverse{};
-                if (value != 0)
-                {
-                    inverse = 1;
-                    uint8_t base = value;
-                    uint16_t exponent = 254;
-                    while (exponent != 0)
-                    {
-                        if ((exponent & 1) != 0)
-                        {
-                            inverse = galois_multiply(inverse, base);
-                        }
-                        base = galois_multiply(base, base);
-                        exponent >>= 1;
-                    }
-                }
-
-                const auto rotate_left = [](const uint8_t input, const uint8_t shift) {
-                    return static_cast<uint8_t>((input << shift) | (input >> (8 - shift)));
-                };
-                return static_cast<uint8_t>(inverse ^ rotate_left(inverse, 1) ^ rotate_left(inverse, 2) ^ rotate_left(inverse, 3) ^
-                                            rotate_left(inverse, 4) ^ 0x63);
-            }
-
-            static void write_inverse_mix_columns(std::array<uint8_t, k_aes_schedule_size>& schedule, const size_t destination_offset,
-                                                  const size_t source_offset)
-            {
-                const auto a0 = schedule[source_offset];
-                const auto a1 = schedule[source_offset + 1];
-                const auto a2 = schedule[source_offset + 2];
-                const auto a3 = schedule[source_offset + 3];
-                schedule[destination_offset] = static_cast<uint8_t>(galois_multiply(a0, 0x0e) ^ galois_multiply(a1, 0x0b) ^
-                                                                    galois_multiply(a2, 0x0d) ^ galois_multiply(a3, 0x09));
-                schedule[destination_offset + 1] = static_cast<uint8_t>(galois_multiply(a0, 0x09) ^ galois_multiply(a1, 0x0e) ^
-                                                                        galois_multiply(a2, 0x0b) ^ galois_multiply(a3, 0x0d));
-                schedule[destination_offset + 2] = static_cast<uint8_t>(galois_multiply(a0, 0x0d) ^ galois_multiply(a1, 0x09) ^
-                                                                        galois_multiply(a2, 0x0e) ^ galois_multiply(a3, 0x0b));
-                schedule[destination_offset + 3] = static_cast<uint8_t>(galois_multiply(a0, 0x0b) ^ galois_multiply(a1, 0x0d) ^
-                                                                        galois_multiply(a2, 0x09) ^ galois_multiply(a3, 0x0e));
-            }
-
-            static std::array<uint8_t, k_aes_schedule_size> build_aes128_schedule(const std::span<const uint8_t> raw_key)
-            {
-                std::array<uint8_t, k_aes_schedule_size> schedule{};
-                std::memcpy(schedule.data(), raw_key.data(), k_aes_128_key_size);
-
-                uint8_t round_constant = 1;
-                for (size_t round = 1; round <= 10; ++round)
-                {
-                    const size_t previous_offset = (round - 1) * k_aes_128_key_size;
-                    const size_t current_offset = round * k_aes_128_key_size;
-                    std::array<uint8_t, 4> transformed = {
-                        aes_sbox(schedule[previous_offset + 13]),
-                        aes_sbox(schedule[previous_offset + 14]),
-                        aes_sbox(schedule[previous_offset + 15]),
-                        aes_sbox(schedule[previous_offset + 12]),
-                    };
-                    transformed[0] ^= round_constant;
-                    for (size_t byte = 0; byte < transformed.size(); ++byte)
-                    {
-                        schedule[current_offset + byte] = schedule[previous_offset + byte] ^ transformed[byte];
-                    }
-                    for (size_t word = 1; word < 4; ++word)
-                    {
-                        const size_t word_offset = word * 4;
-                        for (size_t byte = 0; byte < 4; ++byte)
-                        {
-                            schedule[current_offset + word_offset + byte] =
-                                schedule[previous_offset + word_offset + byte] ^ schedule[current_offset + word_offset - 4 + byte];
-                        }
-                    }
-                    round_constant = galois_multiply(round_constant, 2);
-                }
-
-                for (size_t round = 1; round < 10; ++round)
-                {
-                    const size_t source_offset = round * k_aes_128_key_size;
-                    const size_t destination_offset = 0x130 - (round - 1) * k_aes_128_key_size;
-                    for (size_t column = 0; column < 4; ++column)
-                    {
-                        write_inverse_mix_columns(schedule, destination_offset + column * 4, source_offset + column * 4);
-                    }
-                }
-                std::memcpy(schedule.data() + 0x140, schedule.data(), k_aes_128_key_size);
-                return schedule;
-            }
-
-            static std::optional<std::array<uint8_t, k_opaque_blob_size>> build_kssm_blob(const std::span<const uint8_t> raw_key)
-            {
-                if (raw_key.size() != k_aes_128_key_size)
-                {
-                    return std::nullopt;
-                }
-
-                std::array<uint8_t, k_opaque_blob_size> blob{};
-                const auto write_u32 = [&blob](const size_t offset, const uint32_t value) {
-                    blob[offset] = static_cast<uint8_t>(value);
-                    blob[offset + 1] = static_cast<uint8_t>(value >> 8);
-                    blob[offset + 2] = static_cast<uint8_t>(value >> 16);
-                    blob[offset + 3] = static_cast<uint8_t>(value >> 24);
-                };
-                write_u32(0x00, static_cast<uint32_t>(k_opaque_blob_size));
-                write_u32(0x04, k_opaque_blob_magic);
-                write_u32(0x08, k_opaque_algorithm);
-                write_u32(0x0c, k_opaque_mode);
-                write_u32(0x10, static_cast<uint32_t>(k_aes_128_key_size));
-                write_u32(0x14, k_opaque_flags);
-                write_u32(0x18, static_cast<uint32_t>(k_aes_128_key_size));
-                std::memcpy(blob.data() + 0x1c, raw_key.data(), raw_key.size());
-
-                const auto schedule = build_aes128_schedule(raw_key);
-                std::memcpy(blob.data() + 0x40, schedule.data(), schedule.size());
-                write_u32(0x210, 0xa0);
-                write_u32(0x214, 0x140);
-                return blob;
-            }
-
-            static std::optional<std::vector<uint8_t>> build_opaque_key_payload(const serialized_item& item)
-            {
-                constexpr size_t wrapper_total_size_offset = 0x00;
-                constexpr size_t wrapper_magic_offset = 0x04;
-                constexpr size_t protocol_offset = 0x08;
-                constexpr size_t cipher_suite_offset = 0x0c;
-                constexpr size_t key_state_offset = 0x10;
-                constexpr size_t nested_blob_size_offset = 0x14;
-                constexpr size_t metadata_size_offset = 0x18;
-                constexpr size_t encoding_offset = 0x4c;
-                constexpr size_t opaque_blob_offset = 0x50;
-                constexpr size_t opaque_blob_size_offset = 0x50;
-                constexpr size_t opaque_blob_magic_offset = 0x54;
-                constexpr size_t opaque_algorithm_offset = 0x58;
-                constexpr size_t opaque_mode_offset = 0x5c;
-                constexpr size_t opaque_key_size_offset = 0x60;
-                constexpr size_t opaque_flags_offset = 0x64;
-                constexpr size_t opaque_key_size_copy_offset = 0x68;
-                constexpr size_t raw_key_offset = 0x6c;
-                constexpr uint32_t ssl3_magic = 0x73736c33;
-                constexpr uint32_t tls_1_2 = 0x0303;
-                constexpr uint32_t tls_ecdhe_ecdsa_with_aes_128_gcm_sha256 = 0xc02b;
-                constexpr uint32_t ssl3_metadata_size = 4;
-                constexpr uint32_t ssl3_encoding = 0;
-
-                uint32_t wrapper_total_size{};
-                uint32_t wrapper_magic{};
-                uint32_t protocol{};
-                uint32_t cipher_suite{};
-                uint32_t key_state{};
-                uint32_t nested_blob_size{};
-                uint32_t metadata_size{};
-                uint32_t encoding{};
-                uint32_t opaque_blob_size{};
-                uint32_t opaque_magic{};
-                uint32_t opaque_algorithm{};
-                uint32_t opaque_mode{};
-                uint32_t opaque_key_size{};
-                uint32_t opaque_flags{};
-                uint32_t opaque_key_size_copy{};
-                const uint32_t expected_key_state = item.header.type == k_serialized_read_key ? 1 : 0;
-                if (item.payload.size() != k_ssl3_wrapper_size + k_opaque_blob_size ||
-                    !read_value(item.payload, wrapper_total_size_offset, wrapper_total_size) ||
-                    !read_value(item.payload, wrapper_magic_offset, wrapper_magic) ||
-                    !read_value(item.payload, protocol_offset, protocol) || !read_value(item.payload, cipher_suite_offset, cipher_suite) ||
-                    !read_value(item.payload, key_state_offset, key_state) ||
-                    !read_value(item.payload, nested_blob_size_offset, nested_blob_size) ||
-                    !read_value(item.payload, metadata_size_offset, metadata_size) ||
-                    !read_value(item.payload, encoding_offset, encoding) ||
-                    !read_value(item.payload, opaque_blob_size_offset, opaque_blob_size) ||
-                    !read_value(item.payload, opaque_blob_magic_offset, opaque_magic) ||
-                    !read_value(item.payload, opaque_algorithm_offset, opaque_algorithm) ||
-                    !read_value(item.payload, opaque_mode_offset, opaque_mode) ||
-                    !read_value(item.payload, opaque_key_size_offset, opaque_key_size) ||
-                    !read_value(item.payload, opaque_flags_offset, opaque_flags) ||
-                    !read_value(item.payload, opaque_key_size_copy_offset, opaque_key_size_copy) ||
-                    raw_key_offset + k_aes_128_key_size > item.payload.size() ||
-                    wrapper_total_size != k_ssl3_wrapper_size + k_opaque_blob_size || wrapper_magic != ssl3_magic || protocol != tls_1_2 ||
-                    cipher_suite != tls_ecdhe_ecdsa_with_aes_128_gcm_sha256 || key_state != expected_key_state ||
-                    nested_blob_size != k_opaque_blob_size || metadata_size != ssl3_metadata_size || encoding != ssl3_encoding ||
-                    opaque_blob_size != k_opaque_blob_size || opaque_magic != k_opaque_blob_magic ||
-                    opaque_algorithm != k_opaque_algorithm || opaque_mode != k_opaque_mode || opaque_key_size != k_aes_128_key_size ||
-                    opaque_flags != k_opaque_flags || opaque_key_size_copy != k_aes_128_key_size)
-                {
-                    return std::nullopt;
-                }
-
-                const auto raw_key = item.payload.subspan(raw_key_offset, k_aes_128_key_size);
-                const auto generated_blob = build_kssm_blob(raw_key);
-                if (!generated_blob ||
-                    std::memcmp(item.payload.data() + opaque_blob_offset, generated_blob->data(), generated_blob->size()) != 0)
-                {
-                    return std::nullopt;
-                }
-
-                std::vector<uint8_t> result(item.payload.begin(), item.payload.end());
-                std::memcpy(result.data() + opaque_blob_offset, generated_blob->data(), generated_blob->size());
-                return result;
-            }
-
-            static bool append_serialized_item(utils::aligned_binary_writer& writer, const uint32_t type,
-                                               const std::span<const uint8_t> payload, const uint32_t reported_payload_size)
-            {
-                if (payload.size() > std::numeric_limits<uint32_t>::max())
-                {
-                    return false;
-                }
-
-                const auto padded_payload_size = align_up(payload.size(), 8);
-                writer.write<uint32_t>(type);
-                writer.write<uint32_t>(static_cast<uint32_t>(padded_payload_size));
-                writer.write<uint32_t>(reported_payload_size);
-                writer.write<uint32_t>(0);
-                writer.write(payload.data(), payload.size());
-                writer.pad(padded_payload_size - payload.size());
-                return true;
-            }
-
-            static std::optional<std::vector<uint8_t>> build_final_context(windows_emulator& win_emu)
-            {
-                const auto captured = utils::io::read_file(win_emu.file_sys.translate(R"(C:\fixture\sspi\isc_0006_output_context.bin)"));
-                if (captured.size() != 5096)
-                {
-                    return std::nullopt;
-                }
-
-                const auto bytes = std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(captured.data()), captured.size());
-                std::array<serialized_item, 7> items{};
-                if (!read_serialized_items(bytes, items) || !validate_packed_context(items[0].payload) ||
-                    !validate_provider_name(items[1].payload))
-                {
-                    return std::nullopt;
-                }
-
-                const auto read_key = build_opaque_key_payload(items[2]);
-                const auto write_key = build_opaque_key_payload(items[3]);
-                if (!read_key || !write_key)
-                {
-                    return std::nullopt;
-                }
-
-                std::vector<uint8_t> result;
-                utils::aligned_binary_writer writer(result);
-                if (!append_serialized_item(writer, items[0].header.type, items[0].payload, items[0].header.payload_size) ||
-                    !append_serialized_item(writer, items[1].header.type, items[1].payload, items[1].header.payload_size) ||
-                    !append_serialized_item(writer, items[2].header.type, *read_key, static_cast<uint32_t>(read_key->size())) ||
-                    !append_serialized_item(writer, items[3].header.type, *write_key, static_cast<uint32_t>(write_key->size())) ||
-                    !append_serialized_item(writer, items[4].header.type, items[4].payload, items[4].header.payload_size) ||
-                    !append_serialized_item(writer, items[5].header.type, items[5].payload, items[5].header.payload_size))
-                {
-                    return std::nullopt;
-                }
-
-                writer.write<uint32_t>(0);
-                writer.write<uint32_t>(0);
-                writer.write<uint32_t>(0);
-                writer.write<uint32_t>(0);
-                if (result.size() != k_rebuilt_context_size)
-                {
-                    return std::nullopt;
-                }
-                return result;
-            }
-
-            static bool valid_complete_tls_records(const std::span<const uint8_t> data)
-            {
-                size_t offset = 0;
-                while (offset < data.size())
-                {
-                    if (data.size() - offset < 5 || data[offset + 1] != 3 || data[offset + 2] != 3)
-                    {
-                        return false;
-                    }
-
-                    const size_t record_size = 5 + (static_cast<size_t>(data[offset + 3]) << 8) + data[offset + 4];
-                    if (record_size > data.size() - offset)
-                    {
-                        return false;
-                    }
-                    offset += record_size;
-                }
-                return true;
             }
 
             static bool decode_context_request(windows_emulator& win_emu, const lpc_request_context& c, context_request& result)
@@ -908,13 +454,13 @@ namespace sogen
                 return STATUS_SUCCESS;
             }
 
-            static void write_context_reply(utils::aligned_binary_writer& writer, const uint32_t input_offset,
+            static bool write_context_reply(utils::aligned_binary_writer& writer, const uint32_t context_flags,
                                             const std::span<const uint8_t> token, const uint32_t input_extra_size,
                                             const uint32_t input_extra_type, const security_handle context, const uint32_t package_status,
-                                            const uint64_t expiry, const size_t reply_size)
+                                            const uint64_t expiry)
             {
                 const auto start = writer.offset();
-                writer.write<uint32_t>(input_offset);
+                writer.write<uint32_t>(context_flags);
                 writer.align_to(8);
                 writer.write<uint32_t>(0);
                 writer.write<uint32_t>(1);
@@ -953,26 +499,46 @@ namespace sogen
                 writer.write<uint32_t>(package_status);
                 writer.align_to(8);
                 write_callback_result(writer);
-                finish_reply(writer, start, reply_size);
+                const size_t token_size = token.empty() ? 0 : align_up(sizeof(uint64_t) + token.size(), 8);
+                const size_t mutation_size = input_extra_type == 0 ? 0 : 0x28;
+                return finish_reply(writer, start, 0x140 + token_size + mutation_size);
             }
 
-            static bool write_final_context_reply(utils::aligned_binary_writer& writer, const std::span<const uint8_t> provider_context,
-                                                  const security_handle context)
+            static bool write_final_context_reply(utils::aligned_binary_writer& writer, const std::span<const uint8_t> token,
+                                                  const std::span<const uint8_t> provider_context, const uint32_t input_extra_size,
+                                                  const uint32_t input_extra_type, const security_handle context)
             {
                 const auto start = writer.offset();
                 writer.write<uint32_t>(0x2000);
                 writer.align_to(8);
                 writer.write<uint32_t>(0);
                 writer.write<uint32_t>(1);
-                writer.write_pointer_sized(0x20000);
+                writer.write_ndr_pointer(true);
                 writer.write_pointer_sized(1);
-                writer.write<uint32_t>(0);
+                writer.write<uint32_t>(static_cast<uint32_t>(token.size()));
                 writer.write<uint32_t>(2);
-                writer.write_pointer_sized(0);
-                writer.write_pointer_sized(0);
+                writer.write_ndr_pointer(!token.empty());
+                if (!token.empty())
+                {
+                    writer.write_pointer_sized(token.size());
+                    writer.write(token.data(), token.size(), 1);
+                    writer.align_to(8);
+                }
+
+                writer.write_ndr_pointer(input_extra_type != 0);
                 writer.write<uint32_t>(static_cast<uint32_t>(provider_context.size()));
                 writer.write<uint32_t>(0);
-                writer.write_pointer_sized(0x20000);
+                writer.write_ndr_pointer(true);
+                if (input_extra_type != 0)
+                {
+                    writer.write_pointer_sized(2);
+                    writer.write<uint32_t>(0);
+                    writer.write<uint32_t>(0);
+                    writer.write<uint32_t>(input_extra_size);
+                    writer.write<uint32_t>(input_extra_type);
+                    writer.write_ndr_pointer(false);
+                    writer.write_ndr_pointer(false);
+                }
                 writer.write_pointer_sized(provider_context.size());
                 writer.write(provider_context.data(), provider_context.size(), 1);
                 writer.align_to(8);
@@ -984,7 +550,9 @@ namespace sogen
                 writer.write<uint32_t>(0);
                 writer.align_to(8);
                 write_callback_result(writer);
-                return finish_reply(writer, start, k_final_context_reply_capacity);
+                const size_t token_size = token.empty() ? 0 : align_up(sizeof(uint64_t) + token.size(), 8);
+                const size_t mutation_size = input_extra_type == 0 ? 0 : 0x28;
+                return finish_reply(writer, start, 0x148 + token_size + align_up(provider_context.size(), 8) + mutation_size);
             }
 
             NTSTATUS handle_process_security_context(windows_emulator& win_emu, const lpc_request_context& c,
@@ -993,91 +561,89 @@ namespace sogen
                 context_request request{};
                 if (writer.pointer_size() != utils::aligned_binary_writer::pointer_size_64 || writer.offset() != 0x18 ||
                     !decode_context_request(win_emu, c, request) || !this->credential_.live ||
-                    !matches_marshaled_handle(request.credential, this->credential_.handle) || request.target != "api.github.com" ||
+                    !matches_marshaled_handle(request.credential, this->credential_.handle) || request.target.empty() ||
                     request.requested_attributes != k_context_attributes || request.representation != 0x10)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
 
+                std::span<const uint8_t> input{};
                 if (!this->context_.live)
                 {
                     if (request.context != security_handle{} || !request.buffers.empty())
                     {
                         return STATUS_INVALID_PARAMETER;
                     }
-                    this->context_ = {.handle = {k_context_lower, k_context_upper},
-                                      .credential = this->credential_.handle,
-                                      .target = request.target,
-                                      .phase = 1,
-                                      .live = true};
-                    write_context_reply(writer, 0, k_initial_token, 0, 0, this->context_.handle, k_continue_needed, 0, 0x1e0);
-                    return STATUS_SUCCESS;
+                    auto tls = sspi::tls_client::create(request.target);
+                    if (!tls)
+                    {
+                        return write_context_reply(writer, 0, {}, 0, 0, {}, k_illegal_message, 0) ? STATUS_SUCCESS
+                                                                                                  : STATUS_INVALID_PARAMETER;
+                    }
+                    this->context_ = {
+                        .handle = {k_context_lower, k_context_upper},
+                        .credential = this->credential_.handle,
+                        .target = request.target,
+                        .tls = std::move(tls),
+                        .live = true,
+                    };
+                }
+                else
+                {
+                    if (this->context_.finalized || request.target != this->context_.target ||
+                        !matches_marshaled_handle(request.context, this->context_.handle) || request.buffers.size() != 2 ||
+                        request.buffers[0].type != 2 || request.buffers[0].referent == 0 || request.buffers[1].size != 0 ||
+                        request.buffers[1].type != 0 || request.buffers[1].referent != 0)
+                    {
+                        return STATUS_INVALID_PARAMETER;
+                    }
+                    input = buffer_payload(request, request.buffers[0]);
                 }
 
-                if (!matches_marshaled_handle(request.context, this->context_.handle) || request.buffers.size() != 2 ||
-                    request.buffers[1].size != 0 || request.buffers[1].type != 0 || request.buffers[1].referent != 0)
+                auto result = this->context_.tls->process(input);
+                if (result.output_token.size() > std::numeric_limits<uint32_t>::max() ||
+                    result.missing_size > std::numeric_limits<uint32_t>::max() || result.extra_size > std::numeric_limits<uint32_t>::max())
+                {
+                    result.status = sspi::handshake_status::failed;
+                }
+
+                if (result.status == sspi::handshake_status::failed)
+                {
+                    return write_context_reply(writer, 0, result.output_token, 0, 0, this->context_.handle, k_illegal_message, 0)
+                               ? STATUS_SUCCESS
+                               : STATUS_INVALID_PARAMETER;
+                }
+                if (result.status == sspi::handshake_status::incomplete_message)
+                {
+                    return write_context_reply(writer, 0x10, result.output_token, static_cast<uint32_t>(result.missing_size), 4,
+                                               this->context_.handle, k_incomplete_message, 0)
+                               ? STATUS_SUCCESS
+                               : STATUS_INVALID_PARAMETER;
+                }
+                if (result.status == sspi::handshake_status::continue_needed)
+                {
+                    return write_context_reply(writer, 0, result.output_token, 0, 0, this->context_.handle, k_continue_needed, k_expiry)
+                               ? STATUS_SUCCESS
+                               : STATUS_INVALID_PARAMETER;
+                }
+
+                const auto handoff = this->context_.tls->take_handoff_state();
+                const auto provider_context = handoff ? sspi::build_provider_context(*handoff) : std::nullopt;
+                if (!provider_context)
+                {
+                    return write_context_reply(writer, 0, result.output_token, 0, 0, this->context_.handle, k_illegal_message, 0)
+                               ? STATUS_SUCCESS
+                               : STATUS_INVALID_PARAMETER;
+                }
+                const uint32_t extra_type = result.extra_size == 0 ? 0 : 5;
+                if (!write_final_context_reply(writer, result.output_token, *provider_context, static_cast<uint32_t>(result.extra_size),
+                                               extra_type, this->context_.handle))
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
-                const auto input = buffer_payload(request, request.buffers[0]);
-
-                switch (this->context_.phase)
-                {
-                case 1:
-                    if (input.size() != 1024 || input.size() < 70 || input[0] != 0x16 || input[3] != 0 || input[4] != 0x41 ||
-                        input[70] != 0x16)
-                    {
-                        return STATUS_INVALID_PARAMETER;
-                    }
-                    this->context_.pending_input.assign(input.begin() + 70, input.end());
-                    this->context_.phase = 2;
-                    write_context_reply(writer, 0, {}, 954, 5, this->context_.handle, k_continue_needed, k_expiry, 0x168);
-                    return STATUS_SUCCESS;
-                case 2:
-                    if (!std::ranges::equal(input, this->context_.pending_input))
-                    {
-                        return STATUS_INVALID_PARAMETER;
-                    }
-                    this->context_.phase = 3;
-                    write_context_reply(writer, 0x10, {}, 1786, 4, this->context_.handle, k_incomplete_message, 0, 0x168);
-                    return STATUS_SUCCESS;
-                case 3:
-                    if (input.size() != 2740 || input.size() < this->context_.pending_input.size() ||
-                        !std::ranges::equal(this->context_.pending_input, input.first(this->context_.pending_input.size())) ||
-                        !valid_complete_tls_records(input))
-                    {
-                        return STATUS_INVALID_PARAMETER;
-                    }
-                    this->context_.pending_input.clear();
-                    this->context_.phase = 4;
-                    write_context_reply(writer, 0, {}, 0, 0, this->context_.handle, k_continue_needed, k_expiry, 0x140);
-                    return STATUS_SUCCESS;
-                case 4:
-                    if (input.size() != 163 || !valid_complete_tls_records(input))
-                    {
-                        return STATUS_INVALID_PARAMETER;
-                    }
-                    this->context_.phase = 5;
-                    write_context_reply(writer, 0, k_final_handshake_token, 0, 0, this->context_.handle, k_continue_needed, k_expiry,
-                                        0x1c8);
-                    return STATUS_SUCCESS;
-                case 5: {
-                    if (input.size() != 51 || !valid_complete_tls_records(input))
-                    {
-                        return STATUS_INVALID_PARAMETER;
-                    }
-                    const auto provider_context = build_final_context(win_emu);
-                    if (!provider_context || !write_final_context_reply(writer, *provider_context, this->context_.handle))
-                    {
-                        return STATUS_OBJECT_NAME_NOT_FOUND;
-                    }
-                    this->context_.phase = 6;
-                    this->context_.finalized = true;
-                    return STATUS_SUCCESS;
-                }
-                default:
-                    return STATUS_INVALID_PARAMETER;
-                }
+                this->context_.tls.reset();
+                this->context_.finalized = true;
+                return STATUS_SUCCESS;
             }
 
             NTSTATUS handle_delete_security_context(windows_emulator& win_emu, const lpc_request_context& c,
@@ -1096,6 +662,7 @@ namespace sogen
                     this->context_.live && matches_marshaled_handle(handle, this->context_.handle) ? 0 : k_invalid_handle;
                 if (status == 0)
                 {
+                    this->context_.tls.reset();
                     this->context_.live = false;
                 }
                 const auto start = writer.offset();

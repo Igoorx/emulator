@@ -17,6 +17,8 @@ target_link_libraries(windows-emulator-test PRIVATE
   backend-selection
   vulkan-bridge-marshal
 )
+target_compile_definitions(windows-emulator-test PRIVATE SOGEN_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+
 
 if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
   add_dependencies(windows-emulator-test test-sample)

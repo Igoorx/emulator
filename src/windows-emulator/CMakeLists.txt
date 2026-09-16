@@ -18,6 +18,8 @@ if(NOT SOGEN_ENABLE_SDL3 OR NOT TARGET SDL3::SDL3)
   endif()
 endif()
 
+find_package(OpenSSL 3.5 REQUIRED COMPONENTS SSL Crypto)
+
 add_library(windows-emulator ${SRC_FILES})
 
 sogen_assign_source_group(${SRC_FILES})
@@ -27,7 +29,7 @@ if(NOT SOGEN_ENABLE_CLANG_TIDY)
 endif()
 
 target_link_libraries(windows-emulator PUBLIC emulator minidump)
-target_link_libraries(windows-emulator PRIVATE gpu-bridge-protocol vulkan-headers steam-bridge-protocol)
+target_link_libraries(windows-emulator PRIVATE gpu-bridge-protocol vulkan-headers steam-bridge-protocol OpenSSL::SSL OpenSSL::Crypto)
 
 # When the Steamworks SDK was provided, link the real Steam host backend (owns the SDK headers + the
 # real steamclient64.dll connection behind a clean C ABI) and let the device use it.
