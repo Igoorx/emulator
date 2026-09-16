@@ -206,6 +206,12 @@ namespace sogen
         return this->device_->io_control(win_emu, request);
     }
 
+    size_t io_device_container::cancel_io(windows_emulator& win_emu, const emulator_pointer io_status_block)
+    {
+        this->assert_validity();
+        return this->device_->cancel_io(win_emu, io_status_block);
+    }
+
     emulator_thread& io_device_context::thread() const
     {
         if (!this->vcpu)

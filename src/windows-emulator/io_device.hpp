@@ -143,6 +143,13 @@ namespace sogen
             (void)win_emu;
         }
 
+        virtual size_t cancel_io(windows_emulator& win_emu, emulator_pointer io_status_block)
+        {
+            (void)win_emu;
+            (void)io_status_block;
+            return 0;
+        }
+
         virtual void release_references(process_context& process)
         {
             (void)process;
@@ -202,6 +209,7 @@ namespace sogen
         void work(windows_emulator& win_emu) override;
         void restore_after_state_restore(windows_emulator& win_emu) override;
         NTSTATUS io_control(windows_emulator& win_emu, const io_device_context& context) override;
+        size_t cancel_io(windows_emulator& win_emu, emulator_pointer io_status_block) override;
         NTSTATUS set_completion_association(process_context& process, const emulator_thread* active_thread, handle completion_port,
                                             uint64_t key);
         void set_completion_notification_flags(uint32_t flags);

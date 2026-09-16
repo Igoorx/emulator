@@ -469,6 +469,34 @@ namespace sogen
                 this->delayed_ioctl_ = {};
             }
 
+            void complete_delayed_ioctl(windows_emulator& win_emu, const std::optional<NTSTATUS> status = {})
+            {
+                const auto completed_request = *this->delayed_ioctl_;
+                if (status)
+                {
+                    write_io_status(completed_request.io_status_block, *status, true);
+                }
+
+                if (completed_request.completion_port.bits)
+                {
+                    if (auto* completion = win_emu.process.io_completions.get(completed_request.completion_port))
+                    {
+                        io_completion_message message{};
+                        message.key_context = completed_request.completion_key;
+                        message.apc_context = completed_request.apc_context;
+                        message.io_status_block = completed_request.io_status_block.read();
+                        completion->enqueue(message);
+                    }
+                }
+
+                if (auto* event = win_emu.process.events.get(completed_request.event))
+                {
+                    event->signaled = true;
+                }
+
+                this->clear_pending_state();
+            }
+
             void update_shared_info(windows_emulator& win_emu, const io_device_context& c)
             {
                 this->shared_context_ = win_emu.emu().read_memory(c.input_buffer, c.input_buffer_length);
@@ -610,27 +638,19 @@ namespace sogen
                         }
                     }
 
-                    const auto& completed_request = *this->delayed_ioctl_;
-                    if (completed_request.completion_port.bits)
-                    {
-                        if (auto* completion = win_emu.process.io_completions.get(completed_request.completion_port))
-                        {
-                            io_completion_message message{};
-                            message.key_context = completed_request.completion_key;
-                            message.apc_context = completed_request.apc_context;
-                            message.io_status_block = completed_request.io_status_block.read();
-                            completion->enqueue(message);
-                        }
-                    }
-
-                    auto* e = win_emu.process.events.get(this->delayed_ioctl_->event);
-                    if (e)
-                    {
-                        e->signaled = true;
-                    }
-
-                    this->clear_pending_state();
+                    this->complete_delayed_ioctl(win_emu);
                 }
+            }
+
+            size_t cancel_io(windows_emulator& win_emu, const emulator_pointer io_status_block) override
+            {
+                if (!this->delayed_ioctl_ || (io_status_block != 0 && this->delayed_ioctl_->io_status_block.value() != io_status_block))
+                {
+                    return 0;
+                }
+
+                this->complete_delayed_ioctl(win_emu, STATUS_CANCELLED);
+                return 1;
             }
 
             void deserialize_object(utils::buffer_deserializer& buffer) override
@@ -1516,6 +1536,32 @@ namespace sogen
                     io_completion_wait::release_handle_reference(win_emu.process, pending.retained_completion_port);
                     this->pending_polls_.erase(this->pending_polls_.begin() + static_cast<std::ptrdiff_t>(index));
                 }
+            }
+
+            size_t cancel_io(windows_emulator& win_emu, const emulator_pointer io_status_block) override
+            {
+                size_t cancelled{};
+                for (size_t index = 0; index < this->pending_polls_.size();)
+                {
+                    auto& pending = this->pending_polls_[index];
+                    if (io_status_block != 0 && pending.iosb != io_status_block)
+                    {
+                        ++index;
+                        continue;
+                    }
+
+                    this->complete_poll(win_emu, pending.context, STATUS_CANCELLED);
+                    io_completion_wait::release_handle_reference(win_emu.process, pending.retained_completion_port);
+                    this->pending_polls_.erase(this->pending_polls_.begin() + static_cast<std::ptrdiff_t>(index));
+                    ++cancelled;
+
+                    if (io_status_block != 0)
+                    {
+                        break;
+                    }
+                }
+
+                return cancelled;
             }
 
             void serialize_object(utils::buffer_serializer& buffer) const override

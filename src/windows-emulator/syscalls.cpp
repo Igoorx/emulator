@@ -1050,6 +1050,29 @@ namespace sogen
             }
         }
 
+        NTSTATUS handle_NtCancelIoFileEx(const syscall_context& c, const handle file_handle,
+                                         const emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_request_to_cancel,
+                                         const emulator_object<IO_STATUS_BLOCK<EmulatorTraits<Emu64>>> io_status_block)
+        {
+            const auto resolved_file_handle = c.proc.resolve_object_pseudo_handle(file_handle, c.vcpu.active_thread);
+            auto* device = c.proc.devices.get(resolved_file_handle);
+            if (!device)
+            {
+                if (!c.proc.files.get(resolved_file_handle))
+                {
+                    return STATUS_INVALID_HANDLE;
+                }
+
+                write_io_status(io_status_block, STATUS_NOT_FOUND, true);
+                return STATUS_NOT_FOUND;
+            }
+
+            const auto cancelled = device->cancel_io(c.win_emu, io_request_to_cancel.value());
+            const auto status = cancelled == 0 ? STATUS_NOT_FOUND : STATUS_SUCCESS;
+            write_io_status(io_status_block, status, true);
+            return status;
+        }
+
         NTSTATUS handle_NtQueryWnfStateData()
         {
             return STATUS_SUCCESS;
@@ -1378,6 +1401,7 @@ namespace sogen
         add_handler(NtSecureConnectPort);
         add_handler(NtCreateFile);
         add_handler(NtDeviceIoControlFile);
+        add_handler(NtCancelIoFileEx);
         add_handler(NtQueryWnfStateData);
         add_handler(NtSubscribeWnfStateChange);
         add_handler(NtOpenProcess);
