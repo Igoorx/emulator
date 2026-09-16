@@ -523,14 +523,61 @@ namespace sogen
             return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtAlpcCreateSecurityContext()
+        NTSTATUS handle_NtAlpcCreateSecurityContext(const syscall_context& c, const handle port_handle, const ULONG flags,
+                                                    const emulator_object<ALPC_SECURITY_ATTR<EmulatorTraits<Emu64>>> security_attribute)
         {
-            return STATUS_NOT_SUPPORTED;
+            constexpr ULONG create_handle = 0x20000;
+            constexpr ULONG supported_attribute_flags = 0x70000;
+
+            if (flags != 0 || !security_attribute)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            auto* port = c.proc.ports.get(port_handle);
+            if (!port)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            auto attribute = security_attribute.read();
+            if (!attribute.SecurityQos || (attribute.Flags & create_handle) == 0 || (attribute.Flags & ~supported_attribute_flags) != 0)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            auto* internal_port = port->get_internal_port();
+            if (internal_port->disconnected)
+            {
+                return STATUS_PORT_DISCONNECTED;
+            }
+
+            attribute.ContextHandle = internal_port->create_security_context();
+            security_attribute.write(attribute);
+            return STATUS_SUCCESS;
         }
 
-        NTSTATUS handle_NtAlpcDeleteSecurityContext()
+        NTSTATUS handle_NtAlpcDeleteSecurityContext(const syscall_context& c, const handle port_handle, const ULONG flags,
+                                                    const EmulatorTraits<Emu64>::HANDLE context_handle)
         {
-            return STATUS_NOT_SUPPORTED;
+            if (flags != 0)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            auto* port = c.proc.ports.get(port_handle);
+            if (!port)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+
+            auto* internal_port = port->get_internal_port();
+            if (internal_port->disconnected)
+            {
+                return STATUS_PORT_DISCONNECTED;
+            }
+
+            return internal_port->delete_security_context(context_handle) ? STATUS_SUCCESS : STATUS_INVALID_HANDLE;
         }
 
         NTSTATUS handle_NtAlpcConnectPortEx()
