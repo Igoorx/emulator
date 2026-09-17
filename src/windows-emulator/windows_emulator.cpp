@@ -1233,24 +1233,43 @@ namespace sogen
             }
             else
             {
-                // A fault on a null/near-null address is almost always a call through a null function
-                // pointer (e.g. a Vulkan entry point the shim doesn't implement). Log the caller's
-                // return address so the missing function's call site can be identified.
-                if (address < 0x1000)
+                const auto& thread = vcpu.thread();
+                uint64_t stack_base = thread.stack_base;
+                uint64_t stack_size = thread.stack_size;
+                if (acting.reg<uint16_t>(x86_register::cs) != 0x33 && thread.wow64_stack_base && thread.wow64_stack_size)
                 {
-                    const auto sp = acting.reg<uint32_t>(x86_register::esp);
-                    uint32_t return_address = 0;
-                    if (acting.try_read_memory(sp, &return_address, sizeof(return_address)))
-                    {
-                        const auto* mod = this->mod_manager.find_by_address(return_address);
-                        this->log.error("Null-pointer call to 0x%llx; caller return address 0x%x (%s+0x%llx)\n",
-                                        static_cast<unsigned long long>(address), return_address, mod ? mod->name.c_str() : "?",
-                                        mod ? static_cast<unsigned long long>(return_address - mod->image_base) : return_address);
-                    }
+                    stack_base = *thread.wow64_stack_base;
+                    stack_size = *thread.wow64_stack_size;
                 }
 
-                this->callbacks.on_memory_violate(address, size, operation, type);
-                dispatch_access_violation(*this, vcpu, address, operation);
+                constexpr uint64_t page_size = 0x1000;
+                const auto stack_pointer = acting.reg<uint64_t>(x86_register::rsp);
+                const bool is_stack_overflow = type == memory_violation_type::unmapped && address < stack_base &&
+                                               stack_base - address <= page_size && stack_pointer >= stack_base &&
+                                               stack_pointer <= stack_base + stack_size;
+                if (is_stack_overflow)
+                {
+                    dispatch_exception(*this, vcpu, STATUS_STACK_OVERFLOW, {});
+                }
+                else
+                {
+                    this->callbacks.on_memory_violate(address, size, operation, type);
+
+                    if (address < 0x1000)
+                    {
+                        const auto sp = acting.reg<uint32_t>(x86_register::esp);
+                        uint32_t return_address = 0;
+                        if (acting.try_read_memory(sp, &return_address, sizeof(return_address)))
+                        {
+                            const auto* mod = this->mod_manager.find_by_address(return_address);
+                            this->log.error("Null-pointer call to 0x%llx; caller return address 0x%x (%s+0x%llx)\n",
+                                            static_cast<unsigned long long>(address), return_address, mod ? mod->name.c_str() : "?",
+                                            mod ? static_cast<unsigned long long>(return_address - mod->image_base) : return_address);
+                        }
+                    }
+
+                    dispatch_access_violation(*this, vcpu, address, operation);
+                }
             }
 
             return memory_violation_continuation::resume;

@@ -28,7 +28,7 @@ namespace sogen
 #define PEB_SEGMENT_SIZE (20 << 20) // 20 MB
 #define GS_SEGMENT_SIZE  (1 << 20)  // 1 MB
 
-#define STACK_SIZE       0x40000ULL // 256KB
+#define STACK_SIZE       0x400000ULL // 4MB
 
 #ifdef __APPLE__
 // Darwin refuses MAP_FIXED anywhere in the low ~4GB regardless of ASLR (the 64-bit Mach-O

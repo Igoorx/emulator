@@ -1,6 +1,7 @@
 #include <cstdint>
 #include <cinttypes>
 #include <cstring>
+#include <malloc.h>
 #include <string>
 #include <fstream>
 #include <thread>
@@ -929,6 +930,25 @@ namespace
         }
     }
 
+    __declspec(noinline) void exhaust_stack()
+    {
+        auto* const allocation = static_cast<volatile uint8_t*>(_alloca(0x80000));
+        allocation[0] = 0;
+    }
+
+    bool test_stack_overflow_exception()
+    {
+        __try
+        {
+            exhaust_stack();
+            return false;
+        }
+        __except (GetExceptionCode() == STATUS_STACK_OVERFLOW ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
+        {
+            return _resetstkoflw() != 0;
+        }
+    }
+
     bool test_ud2_exception(void* address)
     {
         __try
@@ -1081,6 +1101,7 @@ namespace
     bool test_native_exceptions()
     {
         return test_access_violation_exception()       //
+               && test_stack_overflow_exception()      //
                && test_illegal_instruction_exception() //
                && test_unhandled_exception()           //
 #ifdef _WIN64
