@@ -20,7 +20,6 @@ namespace sogen
         constexpr uint64_t k_credential_lower = 9;
         constexpr uint64_t k_credential_upper = 0x10498;
         constexpr uint64_t k_context_lower = 0;
-        constexpr uint64_t k_context_upper = 0x104a0;
         constexpr uint64_t k_expiry = 0x7fffff36d5969fff;
         constexpr uint32_t k_supported_context_attributes = 0x0009c19c;
         constexpr uint32_t k_continue_needed = 0x00090312;
@@ -92,17 +91,15 @@ namespace sogen
 
             struct credential_record
             {
-                security_handle handle{k_credential_lower, k_credential_upper};
-                bool live{};
+                security_handle handle{};
             };
 
             struct context_record
             {
-                security_handle handle{k_context_lower, k_context_upper};
+                security_handle handle{};
                 security_handle credential{};
                 std::string target{};
                 std::unique_ptr<sspi::tls_client> tls{};
-                bool live{};
                 bool finalized{};
             };
 
@@ -187,6 +184,24 @@ namespace sogen
             static bool matches_marshaled_handle(const security_handle value, const security_handle expected)
             {
                 return value.upper == expected.upper && (value.lower == 0 || value.lower == expected.lower);
+            }
+
+            security_handle allocate_handle(const uint64_t lower)
+            {
+                const security_handle handle{lower, this->next_handle_upper_};
+                this->next_handle_upper_ += 8;
+                return handle;
+            }
+
+            template <typename Record>
+            static Record* find_record(std::unordered_map<uint64_t, Record>& records, const security_handle handle)
+            {
+                const auto entry = records.find(handle.upper);
+                if (entry == records.end() || !matches_marshaled_handle(handle, entry->second.handle))
+                {
+                    return nullptr;
+                }
+                return &entry->second;
             }
 
             static bool finish_reply(utils::aligned_binary_writer& writer, const uint64_t start, const size_t expected_size)
@@ -525,16 +540,17 @@ namespace sogen
                     return STATUS_INVALID_PARAMETER;
                 }
 
-                this->credential_.live = true;
+                const auto handle = allocate_handle(k_credential_lower);
                 const auto start = writer.offset();
-                writer.write<uint64_t>(this->credential_.handle.lower);
-                writer.write<uint64_t>(this->credential_.handle.upper);
+                writer.write<uint64_t>(handle.lower);
+                writer.write<uint64_t>(handle.upper);
                 writer.write<uint64_t>(k_expiry);
                 write_callback_result(writer);
                 if (!finish_reply(writer, start, 0xa0))
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
+                this->credentials_.emplace(handle.upper, credential_record{handle});
                 return STATUS_SUCCESS;
             }
 
@@ -648,9 +664,7 @@ namespace sogen
                 const bool pointer_size_matches = writer.pointer_size() == utils::aligned_binary_writer::pointer_size_64;
                 const bool writer_offset_matches = writer.offset() == 0x18;
                 const bool request_decoded = decode_context_request(win_emu, c, request, &decode_failure);
-                const bool credential_live = this->credential_.live;
-                const bool credential_handle_matches =
-                    request_decoded && matches_marshaled_handle(request.credential, this->credential_.handle);
+                auto* credential = request_decoded ? find_record(this->credentials_, request.credential) : nullptr;
                 const bool target_present = request_decoded && !request.target.empty();
                 const bool attributes_supported = request_decoded && (request.requested_attributes & ~k_supported_context_attributes) == 0;
                 const bool representation_supported = request_decoded && (request.representation == 0 || request.representation == 0x10);
@@ -663,17 +677,16 @@ namespace sogen
                     }
                 };
 
-                if (!pointer_size_matches || !writer_offset_matches || !request_decoded || !credential_live || !credential_handle_matches ||
-                    !target_present || !attributes_supported || !representation_supported)
+                if (!pointer_size_matches || !writer_offset_matches || !request_decoded || credential == nullptr || !target_present ||
+                    !attributes_supported || !representation_supported)
                 {
                     win_emu.log.error("[sspi] ProcessSecurityContext reject phase=header request_size=0x%zx pointer_size=%zu "
-                                      "writer_offset=0x%zx decoded=%s reason=%s credential_live=%s credential_handle=%s target=%s "
+                                      "writer_offset=0x%zx decoded=%s reason=%s credential_handle=%s target=%s "
                                       "attributes=%s representation=%s\n",
                                       static_cast<size_t>(c.send_buffer_length), writer.pointer_size(), writer.offset(),
                                       request_decoded ? "yes" : "no", decode_failure.empty() ? "-" : decode_failure.c_str(),
-                                      credential_live ? "yes" : "no", credential_handle_matches ? "yes" : "no",
-                                      target_present ? "yes" : "no", attributes_supported ? "yes" : "no",
-                                      representation_supported ? "yes" : "no");
+                                      credential != nullptr ? "yes" : "no", target_present ? "yes" : "no",
+                                      attributes_supported ? "yes" : "no", representation_supported ? "yes" : "no");
                     log_raw_request();
                     return STATUS_INVALID_PARAMETER;
                 }
@@ -690,14 +703,12 @@ namespace sogen
                 }
 
                 std::span<const uint8_t> input{};
-                if (!this->context_.live)
+                context_record* context{};
+                if (request.context == security_handle{})
                 {
-                    const bool initial_context = request.context == security_handle{};
-                    const bool initial_buffers = request.buffers.empty();
-                    if (!initial_context || !initial_buffers)
+                    if (!request.buffers.empty())
                     {
-                        win_emu.log.error("[sspi] ProcessSecurityContext reject phase=initial context_zero=%s buffers_empty=%s\n",
-                                          initial_context ? "yes" : "no", initial_buffers ? "yes" : "no");
+                        win_emu.log.error("[sspi] ProcessSecurityContext reject phase=initial buffers_empty=no\n");
                         log_raw_request();
                         return STATUS_INVALID_PARAMETER;
                     }
@@ -709,35 +720,38 @@ namespace sogen
                                    ? STATUS_SUCCESS
                                    : STATUS_INVALID_PARAMETER;
                     }
-                    this->context_ = {
-                        .handle = {k_context_lower, k_context_upper},
-                        .credential = this->credential_.handle,
-                        .target = request.target,
-                        .tls = std::move(tls),
-                        .live = true,
-                    };
+
+                    const auto handle = allocate_handle(k_context_lower);
+                    const auto [entry, inserted] =
+                        this->contexts_.emplace(handle.upper, context_record{handle, credential->handle, request.target, std::move(tls)});
+                    if (!inserted)
+                    {
+                        return STATUS_INVALID_PARAMETER;
+                    }
+                    context = &entry->second;
                 }
                 else
                 {
-                    const bool target_matches = request.target == this->context_.target;
-                    const bool context_handle_matches = matches_marshaled_handle(request.context, this->context_.handle);
+                    context = find_record(this->contexts_, request.context);
+                    const bool credential_matches = context != nullptr && context->credential == credential->handle;
+                    const bool target_matches = context != nullptr && request.target == context->target;
                     const bool continuation_buffers = request.buffers.size() == 2 && request.buffers[0].type == 2 &&
                                                       request.buffers[0].referent != 0 && request.buffers[1].size == 0 &&
                                                       request.buffers[1].type == 0 && request.buffers[1].referent == 0;
-                    if (this->context_.finalized || !target_matches || !context_handle_matches || !continuation_buffers)
+                    if (context == nullptr || context->finalized || !credential_matches || !target_matches || !continuation_buffers)
                     {
-                        win_emu.log.error("[sspi] ProcessSecurityContext reject phase=continuation finalized=%s target_match=%s "
-                                          "context_handle=%s buffer_shape=%s buffer_count=%zu\n",
-                                          this->context_.finalized ? "yes" : "no", target_matches ? "yes" : "no",
-                                          context_handle_matches ? "yes" : "no", continuation_buffers ? "yes" : "no",
-                                          request.buffers.size());
+                        win_emu.log.error("[sspi] ProcessSecurityContext reject phase=continuation context_handle=%s finalized=%s "
+                                          "credential_match=%s target_match=%s buffer_shape=%s buffer_count=%zu\n",
+                                          context != nullptr ? "yes" : "no", context != nullptr && context->finalized ? "yes" : "no",
+                                          credential_matches ? "yes" : "no", target_matches ? "yes" : "no",
+                                          continuation_buffers ? "yes" : "no", request.buffers.size());
                         log_raw_request();
                         return STATUS_INVALID_PARAMETER;
                     }
                     input = buffer_payload(request, request.buffers[0]);
                 }
 
-                auto result = this->context_.tls->process(input);
+                auto result = context->tls->process(input);
                 if (result.output_token.size() > std::numeric_limits<uint32_t>::max() ||
                     result.missing_size > std::numeric_limits<uint32_t>::max() || result.extra_size > std::numeric_limits<uint32_t>::max())
                 {
@@ -750,7 +764,7 @@ namespace sogen
 
                 if (result.status == sspi::handshake_status::failed)
                 {
-                    return write_context_reply(writer, 0, request.requested_attributes, result.output_token, 0, 0, this->context_.handle,
+                    return write_context_reply(writer, 0, request.requested_attributes, result.output_token, 0, 0, context->handle,
                                                k_illegal_message, 0)
                                ? STATUS_SUCCESS
                                : STATUS_INVALID_PARAMETER;
@@ -758,38 +772,37 @@ namespace sogen
                 if (result.status == sspi::handshake_status::incomplete_message)
                 {
                     return write_context_reply(writer, 0x10, request.requested_attributes, result.output_token,
-                                               static_cast<uint32_t>(result.missing_size), 4, this->context_.handle, k_incomplete_message,
-                                               0)
+                                               static_cast<uint32_t>(result.missing_size), 4, context->handle, k_incomplete_message, 0)
                                ? STATUS_SUCCESS
                                : STATUS_INVALID_PARAMETER;
                 }
                 if (result.status == sspi::handshake_status::continue_needed)
                 {
-                    return write_context_reply(writer, 0, request.requested_attributes, result.output_token, 0, 0, this->context_.handle,
+                    return write_context_reply(writer, 0, request.requested_attributes, result.output_token, 0, 0, context->handle,
                                                k_continue_needed, k_expiry)
                                ? STATUS_SUCCESS
                                : STATUS_INVALID_PARAMETER;
                 }
 
-                const auto handoff = this->context_.tls->take_handoff_state();
+                const auto handoff = context->tls->take_handoff_state();
                 const auto provider_context = handoff ? sspi::build_provider_context(*handoff) : std::nullopt;
                 if (!provider_context)
                 {
                     win_emu.log.error("[sspi] ProcessSecurityContext provider-context handoff failed\n");
-                    return write_context_reply(writer, 0, request.requested_attributes, result.output_token, 0, 0, this->context_.handle,
+                    return write_context_reply(writer, 0, request.requested_attributes, result.output_token, 0, 0, context->handle,
                                                k_illegal_message, 0)
                                ? STATUS_SUCCESS
                                : STATUS_INVALID_PARAMETER;
                 }
                 const uint32_t extra_type = result.extra_size == 0 ? 0 : 5;
                 if (!write_final_context_reply(writer, request.requested_attributes, result.output_token, *provider_context,
-                                               static_cast<uint32_t>(result.extra_size), extra_type, this->context_.handle))
+                                               static_cast<uint32_t>(result.extra_size), extra_type, context->handle))
                 {
                     win_emu.log.error("[sspi] ProcessSecurityContext final reply serialization failed\n");
                     return STATUS_INVALID_PARAMETER;
                 }
-                this->context_.tls.reset();
-                this->context_.finalized = true;
+                context->tls.reset();
+                context->finalized = true;
                 return STATUS_SUCCESS;
             }
 
@@ -805,12 +818,11 @@ namespace sogen
                     return STATUS_INVALID_PARAMETER;
                 }
 
-                const uint32_t status =
-                    this->context_.live && matches_marshaled_handle(handle, this->context_.handle) ? 0 : k_invalid_handle;
-                if (status == 0)
+                const auto* context = find_record(this->contexts_, handle);
+                const uint32_t status = context != nullptr ? 0 : k_invalid_handle;
+                if (context != nullptr)
                 {
-                    this->context_.tls.reset();
-                    this->context_.live = false;
+                    this->contexts_.erase(handle.upper);
                 }
                 const auto start = writer.offset();
                 writer.write<uint32_t>(status);
@@ -833,11 +845,11 @@ namespace sogen
                     return STATUS_INVALID_PARAMETER;
                 }
 
-                const uint32_t status =
-                    this->credential_.live && matches_marshaled_handle(handle, this->credential_.handle) ? 0 : k_invalid_handle;
-                if (status == 0)
+                const auto* credential = find_record(this->credentials_, handle);
+                const uint32_t status = credential != nullptr ? 0 : k_invalid_handle;
+                if (credential != nullptr)
                 {
-                    this->credential_.live = false;
+                    this->credentials_.erase(handle.upper);
                 }
                 const auto start = writer.offset();
                 writer.write<uint32_t>(status);
@@ -877,8 +889,9 @@ namespace sogen
             bool connected_{};
             uint16_t package_calls_{};
             uint64_t package_strings_{};
-            credential_record credential_{};
-            context_record context_{};
+            uint64_t next_handle_upper_{k_credential_upper};
+            std::unordered_map<uint64_t, credential_record> credentials_{};
+            std::unordered_map<uint64_t, context_record> contexts_{};
         };
     }
 
