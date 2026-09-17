@@ -4,9 +4,11 @@
 #include <openssl/core_names.h>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
+#include <openssl/err.h>
 #include <openssl/kdf.h>
 #include <openssl/params.h>
 #include <openssl/ssl.h>
+#include <openssl/x509.h>
 
 namespace sogen::sspi
 {
@@ -14,6 +16,25 @@ namespace sogen::sspi
     {
         template <typename T, void (*Free)(T*)>
         using openssl_ptr = std::unique_ptr<T, decltype(Free)>;
+
+        struct x509_stack_deleter
+        {
+            void operator()(STACK_OF(X509) * certificates) const
+            {
+                sk_X509_pop_free(certificates, X509_free);
+            }
+        };
+
+        struct borrowed_x509_stack_deleter
+        {
+            void operator()(STACK_OF(X509) * certificates) const
+            {
+                sk_X509_free(certificates);
+            }
+        };
+
+        using x509_stack_ptr = std::unique_ptr<STACK_OF(X509), x509_stack_deleter>;
+        using borrowed_x509_stack_ptr = std::unique_ptr<STACK_OF(X509), borrowed_x509_stack_deleter>;
 
         template <size_t Size>
         struct secret_bytes
@@ -25,12 +46,118 @@ namespace sogen::sspi
 
             std::array<uint8_t, Size> bytes{};
         };
+
+        std::optional<std::vector<uint8_t>> encode_certificate(const X509& certificate)
+        {
+            const int size = i2d_X509(&certificate, nullptr);
+            if (size <= 0)
+            {
+                return std::nullopt;
+            }
+
+            std::vector<uint8_t> result(static_cast<size_t>(size));
+            unsigned char* output = result.data();
+            if (i2d_X509(&certificate, &output) != size || output != result.data() + result.size())
+            {
+                return std::nullopt;
+            }
+            return result;
+        }
+
+        std::optional<std::vector<std::vector<uint8_t>>> encode_certificates(const STACK_OF(X509) & certificates)
+        {
+            std::vector<std::vector<uint8_t>> result;
+            const int count = sk_X509_num(&certificates);
+            result.reserve(static_cast<size_t>(count));
+            for (int index = 0; index < count; ++index)
+            {
+                X509* certificate = sk_X509_value(&certificates, index);
+                if (certificate == nullptr)
+                {
+                    return std::nullopt;
+                }
+                auto encoded = encode_certificate(*certificate);
+                if (!encoded)
+                {
+                    return std::nullopt;
+                }
+                result.push_back(std::move(*encoded));
+            }
+            return result;
+        }
+
+        std::optional<std::vector<std::vector<uint8_t>>> capture_peer_certificates(SSL_CTX& context, SSL& ssl,
+                                                                                   const std::string_view target)
+        {
+            openssl_ptr<X509, X509_free> peer{SSL_get1_peer_certificate(&ssl), X509_free};
+            if (!peer)
+            {
+                return std::nullopt;
+            }
+
+            const STACK_OF(X509)* peer_chain = SSL_get_peer_cert_chain(&ssl);
+            borrowed_x509_stack_ptr untrusted{sk_X509_new_null()};
+            if (!untrusted)
+            {
+                return std::nullopt;
+            }
+            const int peer_chain_size = peer_chain == nullptr ? 0 : sk_X509_num(peer_chain);
+            for (int index = 0; index < peer_chain_size; ++index)
+            {
+                X509* certificate = sk_X509_value(peer_chain, index);
+                if (certificate != nullptr && X509_cmp(certificate, peer.get()) != 0 && sk_X509_push(untrusted.get(), certificate) == 0)
+                {
+                    return std::nullopt;
+                }
+            }
+
+            openssl_ptr<X509_STORE_CTX, X509_STORE_CTX_free> store_context{X509_STORE_CTX_new(), X509_STORE_CTX_free};
+            if (store_context &&
+                X509_STORE_CTX_init(store_context.get(), SSL_CTX_get_cert_store(&context), peer.get(), untrusted.get()) == 1)
+            {
+                X509_VERIFY_PARAM* parameters = X509_STORE_CTX_get0_param(store_context.get());
+                if (parameters != nullptr && X509_VERIFY_PARAM_set1_host(parameters, target.data(), target.size()) == 1 &&
+                    X509_verify_cert(store_context.get()) == 1)
+                {
+                    x509_stack_ptr verified_chain{X509_STORE_CTX_get1_chain(store_context.get())};
+                    if (verified_chain)
+                    {
+                        return encode_certificates(*verified_chain);
+                    }
+                }
+            }
+            ERR_clear_error();
+
+            std::vector<std::vector<uint8_t>> result;
+            auto encoded_peer = encode_certificate(*peer);
+            if (!encoded_peer)
+            {
+                return std::nullopt;
+            }
+            result.push_back(std::move(*encoded_peer));
+            for (int index = 0; index < peer_chain_size; ++index)
+            {
+                X509* certificate = sk_X509_value(peer_chain, index);
+                if (certificate == nullptr || X509_cmp(certificate, peer.get()) == 0)
+                {
+                    continue;
+                }
+                auto encoded = encode_certificate(*certificate);
+                if (!encoded)
+                {
+                    return std::nullopt;
+                }
+                result.push_back(std::move(*encoded));
+            }
+            return result;
+        }
     }
 
     struct tls_client::impl
     {
         openssl_ptr<SSL_CTX, SSL_CTX_free> context{nullptr, SSL_CTX_free};
         openssl_ptr<SSL, SSL_free> ssl{nullptr, SSL_free};
+        std::string target{};
         BIO* read_bio{};
         BIO* write_bio{};
         tls_record_counter inbound_counter{};
@@ -170,12 +297,19 @@ namespace sogen::sspi
                 return std::nullopt;
             }
 
+            auto peer_certificates = capture_peer_certificates(*context, *ssl, target);
+            if (!peer_certificates)
+            {
+                return std::nullopt;
+            }
+
             provider_context_input result{
                 .protocol = tls_1_2,
                 .cipher_suite = cipher_suite,
                 .inbound_sequence = inbound_counter.value(),
                 .outbound_sequence = outbound_counter.value(),
                 .serialized_context_flags = 0x0000000008008200,
+                .peer_certificates = std::move(*peer_certificates),
             };
             std::memcpy(result.outbound_raw_key.data(), key_block.bytes.data(), result.outbound_raw_key.size());
             std::memcpy(result.inbound_raw_key.data(), key_block.bytes.data() + 16, result.inbound_raw_key.size());
@@ -202,8 +336,13 @@ namespace sogen::sspi
             return nullptr;
         }
         SSL_CTX_set_verify(state->context.get(), SSL_VERIFY_NONE, nullptr);
+        if (SSL_CTX_set_default_verify_paths(state->context.get()) != 1)
+        {
+            ERR_clear_error();
+        }
         SSL_CTX_set_session_cache_mode(state->context.get(), SSL_SESS_CACHE_OFF);
         SSL_CTX_set_options(state->context.get(), SSL_OP_NO_RENEGOTIATION);
+        state->target = target;
 
         state->ssl.reset(SSL_new(state->context.get()));
         BIO* read_bio = BIO_new(BIO_s_mem());

@@ -1,6 +1,7 @@
 #include "../windows-emulator/ports/sspi_context.hpp"
 
 #include <gtest/gtest.h>
+#include <openssl/evp.h>
 
 #include <cstring>
 #include <filesystem>
@@ -70,6 +71,129 @@ namespace
         return offset == bytes.size() ? result : std::vector<item>{};
     }
 
+    std::span<const uint8_t> captured_certificate_store()
+    {
+        static const std::vector<uint8_t> capture = read_capture();
+        static const std::vector<item> items = parse_items(capture);
+        if (items.size() < 5 || items[4].type != 0x15 || items[4].reported_size > items[4].payload.size())
+        {
+            return {};
+        }
+        return items[4].payload.first(items[4].reported_size);
+    }
+
+    std::vector<std::vector<uint8_t>> certificate_chain(const std::span<const uint8_t> store)
+    {
+        constexpr uint32_t chain_index_property = 0xe697;
+        constexpr uint32_t certificate_property = 0x20;
+        if (store.size() < 20 || std::memcmp(store.data(), "\0\0\0\0CERT", 8) != 0)
+        {
+            return {};
+        }
+
+        std::vector<std::vector<uint8_t>> result;
+        std::optional<uint32_t> chain_index;
+        size_t offset = 8;
+        while (offset + 12 <= store.size())
+        {
+            const uint32_t property = read_value<uint32_t>(store, offset);
+            const uint32_t marker = read_value<uint32_t>(store, offset + 4);
+            const uint32_t size = read_value<uint32_t>(store, offset + 8);
+            offset += 12;
+            if (property == 0)
+            {
+                return marker == 0 && size == 0 ? result : std::vector<std::vector<uint8_t>>{};
+            }
+            if (marker != 1 || size > store.size() - offset)
+            {
+                return {};
+            }
+            if (property == chain_index_property && size == sizeof(uint32_t))
+            {
+                chain_index = read_value<uint32_t>(store, offset);
+            }
+            else if (property == certificate_property)
+            {
+                if (!chain_index)
+                {
+                    return {};
+                }
+                if (result.size() <= *chain_index)
+                {
+                    result.resize(static_cast<size_t>(*chain_index) + 1);
+                }
+                result[*chain_index].assign(store.begin() + static_cast<std::ptrdiff_t>(offset),
+                                            store.begin() + static_cast<std::ptrdiff_t>(offset + size));
+                chain_index.reset();
+            }
+            offset += size;
+        }
+        return {};
+    }
+
+    std::vector<uint8_t> captured_certificate_store_without_status()
+    {
+        constexpr uint32_t certificate_status_property = 0x77;
+        const auto store = captured_certificate_store();
+        if (store.size() < 20)
+        {
+            return {};
+        }
+
+        std::vector<uint8_t> result(store.begin(), store.begin() + 8);
+        size_t offset = 8;
+        while (offset + 12 <= store.size())
+        {
+            const uint32_t property = read_value<uint32_t>(store, offset);
+            const uint32_t size = read_value<uint32_t>(store, offset + 8);
+            if (size > store.size() - offset - 12)
+            {
+                return {};
+            }
+            if (property != certificate_status_property)
+            {
+                result.insert(result.end(), store.begin() + static_cast<std::ptrdiff_t>(offset),
+                              store.begin() + static_cast<std::ptrdiff_t>(offset + 12 + size));
+            }
+            offset += 12 + size;
+            if (property == 0)
+            {
+                return result;
+            }
+        }
+        return {};
+    }
+
+    std::span<const uint8_t> certificate_store_property(const std::span<const uint8_t> store, const uint32_t requested_property)
+    {
+        size_t offset = 8;
+        while (offset + 12 <= store.size())
+        {
+            const uint32_t property = read_value<uint32_t>(store, offset);
+            const uint32_t size = read_value<uint32_t>(store, offset + 8);
+            offset += 12;
+            if (property == 0 || size > store.size() - offset)
+            {
+                return {};
+            }
+            if (property == requested_property)
+            {
+                return store.subspan(offset, size);
+            }
+            offset += size;
+        }
+        return {};
+    }
+
+    std::array<uint8_t, 20> certificate_sha1(const std::span<const uint8_t> certificate)
+    {
+        std::array<uint8_t, 20> result{};
+        unsigned int size{};
+        EXPECT_EQ(EVP_Digest(certificate.data(), certificate.size(), result.data(), &size, EVP_sha1(), nullptr), 1);
+        EXPECT_EQ(size, result.size());
+        return result;
+    }
+
     sogen::sspi::provider_context_input fixture_input()
     {
         return {
@@ -82,18 +206,21 @@ namespace
             .outbound_fixed_iv = {0xba, 0x79, 0x03, 0xb0},
             .outbound_sequence = 1,
             .serialized_context_flags = 0x0000000008008200,
+            .peer_certificates = certificate_chain(captured_certificate_store()),
         };
     }
 }
 
-TEST(sspi_context, builds_minimal_provider_context_from_named_inputs)
+TEST(sspi_context, builds_provider_context_with_remote_certificate)
 {
     const auto generated = sogen::sspi::build_provider_context(fixture_input());
     ASSERT_TRUE(generated);
-    EXPECT_EQ(generated->size(), 1624);
+    const auto expected_certificate_store = captured_certificate_store_without_status();
+    ASSERT_EQ(expected_certificate_store.size(), 2919);
+    EXPECT_EQ(generated->size(), 1624 + 16 + 3424);
 
     const auto items = parse_items(*generated);
-    ASSERT_EQ(items.size(), 5);
+    ASSERT_EQ(items.size(), 6);
     EXPECT_EQ(items[0].type, 1);
     EXPECT_EQ(items[0].padded_size, 200);
     EXPECT_EQ(items[0].reported_size, 0);
@@ -103,7 +230,10 @@ TEST(sspi_context, builds_minimal_provider_context_from_named_inputs)
     EXPECT_EQ(items[2].padded_size, 640);
     EXPECT_EQ(items[3].type, 3);
     EXPECT_EQ(items[3].padded_size, 640);
-    EXPECT_EQ(items[4].type, 0);
+    EXPECT_EQ(items[4].type, 0x15);
+    EXPECT_EQ(items[4].padded_size, 3424);
+    EXPECT_EQ(items[4].reported_size, 3417);
+    EXPECT_EQ(items[5].type, 0);
 
     const auto packed = items[0].payload;
     EXPECT_EQ(read_value<uint32_t>(packed, 0x00), 4);
@@ -133,13 +263,84 @@ TEST(sspi_context, key_records_match_native_capture_oracle)
     const auto generated = sogen::sspi::build_provider_context(fixture_input());
     ASSERT_TRUE(generated);
     const auto generated_items = parse_items(*generated);
-    ASSERT_EQ(generated_items.size(), 5);
+    ASSERT_EQ(generated_items.size(), 6);
 
     EXPECT_TRUE(std::ranges::equal(generated_items[1].payload, captured_items[1].payload));
     EXPECT_TRUE(std::ranges::equal(generated_items[2].payload, captured_items[2].payload));
     EXPECT_TRUE(std::ranges::equal(generated_items[3].payload, captured_items[3].payload));
     EXPECT_EQ(read_value<uint32_t>(generated_items[2].payload, 0x10), 1);
     EXPECT_EQ(read_value<uint32_t>(generated_items[3].payload, 0x10), 0);
+}
+
+TEST(sspi_context, certificate_store_preserves_native_chain_identity)
+{
+    const auto expected = certificate_chain(captured_certificate_store());
+    ASSERT_EQ(expected.size(), 3);
+
+    const auto generated = sogen::sspi::build_provider_context(fixture_input());
+    ASSERT_TRUE(generated);
+    const auto items = parse_items(*generated);
+    ASSERT_EQ(items.size(), 6);
+    EXPECT_EQ(certificate_chain(items[4].payload.first(items[4].reported_size)), expected);
+}
+
+TEST(sspi_context, serializes_remote_certificate_chain_context)
+{
+    constexpr size_t header_size = 0xa0;
+    constexpr size_t element_size = 0x38;
+    constexpr size_t oid_count = 7;
+    constexpr size_t string_offset = 0x164;
+    constexpr size_t string_size = 0x82;
+    const auto input = fixture_input();
+    ASSERT_EQ(input.peer_certificates.size(), 3);
+
+    const auto generated = sogen::sspi::build_provider_context(input);
+    ASSERT_TRUE(generated);
+    const auto items = parse_items(*generated);
+    ASSERT_EQ(items.size(), 6);
+    const auto store = items[4].payload.first(items[4].reported_size);
+    const auto chain_context = certificate_store_property(store, 0x77);
+    ASSERT_EQ(chain_context.size(), 486);
+    const auto captured_chain_context = certificate_store_property(captured_certificate_store(), 0x77);
+    ASSERT_GE(captured_chain_context.size(), header_size);
+    EXPECT_EQ(read_value<uint32_t>(chain_context, 0x20), 0);
+    EXPECT_EQ(read_value<uint32_t>(chain_context, 0x24), 0x100);
+    EXPECT_EQ(read_value<uint64_t>(chain_context, 0x28), read_value<uint64_t>(captured_chain_context, 0x28));
+    EXPECT_EQ(read_value<uint64_t>(chain_context, 0x30), read_value<uint64_t>(captured_chain_context, 0x30));
+    EXPECT_EQ(read_value<uint32_t>(chain_context, 0x00), 0x43435343);
+    EXPECT_EQ(read_value<uint32_t>(chain_context, 0x04), chain_context.size());
+    EXPECT_EQ(read_value<uint32_t>(chain_context, 0x08), header_size);
+    EXPECT_EQ(read_value<uint32_t>(chain_context, 0x0c), element_size);
+    EXPECT_EQ(read_value<uint32_t>(chain_context, 0x10), input.peer_certificates.size());
+    EXPECT_EQ(read_value<uint32_t>(chain_context, 0x14), oid_count);
+    EXPECT_EQ(read_value<uint32_t>(chain_context, 0x18), string_offset);
+    EXPECT_EQ(read_value<uint32_t>(chain_context, 0x1c), string_size);
+
+    constexpr std::array<uint32_t, 3> trust_info = {0x102, 0x102, 0x10c};
+    constexpr std::array<uint32_t, 3> first_usage = {2, 3, 5};
+    constexpr std::array<uint32_t, 3> second_usage = {1, 2, 2};
+    constexpr std::array<uint32_t, 3> first_usage_count = {2, std::numeric_limits<uint32_t>::max(), std::numeric_limits<uint32_t>::max()};
+    for (size_t index = 0; index < input.peer_certificates.size(); ++index)
+    {
+        const size_t offset = header_size + index * element_size;
+        EXPECT_EQ(read_value<uint32_t>(chain_context, offset), element_size);
+        EXPECT_EQ(read_value<uint32_t>(chain_context, offset + 0x04), 0);
+        EXPECT_EQ(read_value<uint32_t>(chain_context, offset + 0x08), 0);
+        EXPECT_EQ(read_value<uint32_t>(chain_context, offset + 0x0c), trust_info[index]);
+        EXPECT_EQ(read_value<uint32_t>(chain_context, offset + 0x10), first_usage_count[index]);
+        EXPECT_EQ(read_value<uint32_t>(chain_context, offset + 0x14), 0);
+        EXPECT_EQ(read_value<uint32_t>(chain_context, offset + 0x18), second_usage[index]);
+        EXPECT_EQ(read_value<uint32_t>(chain_context, offset + 0x1c), first_usage[index]);
+        const auto expected_sha1 = certificate_sha1(input.peer_certificates[index]);
+        EXPECT_TRUE(std::ranges::equal(chain_context.subspan(offset + 0x20, expected_sha1.size()), expected_sha1));
+    }
+}
+
+TEST(sspi_context, rejects_missing_remote_certificate)
+{
+    auto input = fixture_input();
+    input.peer_certificates.clear();
+    EXPECT_FALSE(sogen::sspi::build_provider_context(input));
 }
 
 TEST(sspi_context, reports_exact_missing_tls_record_bytes)
