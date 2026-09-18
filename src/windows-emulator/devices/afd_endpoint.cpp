@@ -279,7 +279,7 @@ namespace sogen
                 socket_events |= POLLRDBAND;
             }
 
-            if (poll_events & (AFD_POLL_CONNECT | AFD_POLL_CONNECT_FAIL | AFD_POLL_SEND))
+            if (poll_events & (AFD_POLL_CONNECT | AFD_POLL_SEND))
             {
                 socket_events |= POLLWRNORM;
             }
@@ -309,30 +309,32 @@ namespace sogen
                 afd_events |= AFD_POLL_RECEIVE_EXPEDITED;
             }
 
-            if (socket_events & POLLWRNORM)
+            const bool has_host_error = (socket_events & POLLERR) != 0;
+            const bool has_host_hangup = (socket_events & POLLHUP) != 0;
+            const bool has_connect_failure = has_host_error || has_host_hangup;
+            if (socket_events & POLLWRNORM && !has_connect_failure)
             {
-                if (!is_connecting && afd_poll_events & AFD_POLL_SEND)
+                if (afd_poll_events & AFD_POLL_SEND)
                 {
                     afd_events |= AFD_POLL_SEND;
                 }
-                else if (is_connecting && afd_poll_events & AFD_POLL_CONNECT)
+
+                if (is_connecting && afd_poll_events & AFD_POLL_CONNECT)
                 {
                     afd_events |= AFD_POLL_CONNECT;
                 }
             }
 
-            if ((socket_events & (POLLHUP | POLLERR)) == (POLLHUP | POLLERR))
+            if (has_connect_failure && afd_poll_events & AFD_POLL_CONNECT_FAIL)
             {
-                if (afd_poll_events & AFD_POLL_CONNECT_FAIL)
-                {
-                    afd_events |= AFD_POLL_CONNECT_FAIL;
-                }
-                if (afd_poll_events & AFD_POLL_ABORT)
-                {
-                    afd_events |= AFD_POLL_ABORT;
-                }
+                afd_events |= AFD_POLL_CONNECT_FAIL;
             }
-            else if (socket_events & POLLHUP && afd_poll_events & AFD_POLL_DISCONNECT)
+
+            if (has_host_error && has_host_hangup && afd_poll_events & AFD_POLL_ABORT)
+            {
+                afd_events |= AFD_POLL_ABORT;
+            }
+            else if (has_host_hangup && !has_host_error && afd_poll_events & AFD_POLL_DISCONNECT)
             {
                 afd_events |= AFD_POLL_DISCONNECT;
             }

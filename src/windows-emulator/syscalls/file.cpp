@@ -130,12 +130,35 @@ namespace sogen
             auto* f = c.proc.files.get(file_handle);
             if (!f)
             {
-                if (c.proc.devices.get(file_handle))
+                auto* device = c.proc.devices.get(file_handle);
+                if (!device)
                 {
-                    return STATUS_SUCCESS;
+                    return STATUS_INVALID_HANDLE;
                 }
 
-                return STATUS_INVALID_HANDLE;
+                if (info_class == FileCompletionInformation)
+                {
+                    if (length < sizeof(handle) + sizeof(uint64_t))
+                    {
+                        return STATUS_INFO_LENGTH_MISMATCH;
+                    }
+
+                    const auto completion_port = c.emu.read_memory<handle>(file_information);
+                    const auto completion_key = c.emu.read_memory<uint64_t>(file_information + sizeof(handle));
+                    return device->set_completion_association(c.proc, c.vcpu.active_thread, completion_port, completion_key);
+                }
+
+                if (info_class == FileIoCompletionNotificationInformation)
+                {
+                    if (length < sizeof(ULONG))
+                    {
+                        return STATUS_INFO_LENGTH_MISMATCH;
+                    }
+
+                    device->set_completion_notification_flags(c.emu.read_memory<ULONG>(file_information));
+                }
+
+                return STATUS_SUCCESS;
             }
 
             if (info_class == FileBasicInformation)
