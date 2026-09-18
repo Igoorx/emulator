@@ -192,6 +192,8 @@ namespace sogen
         NTSTATUS io_control(windows_emulator& win_emu, const io_device_context& context) override;
         NTSTATUS set_completion_association(process_context& process, const emulator_thread* active_thread, handle completion_port,
                                             uint64_t key);
+        NTSTATUS replace_completion_association(process_context& process, const emulator_thread* active_thread, handle completion_port,
+                                                uint64_t key);
         void set_completion_notification_flags(uint32_t flags);
         void release_references(process_context& process) override;
 

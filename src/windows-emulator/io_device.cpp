@@ -137,6 +137,33 @@ namespace sogen
     NTSTATUS io_device_container::set_completion_association(process_context& process, const emulator_thread* active_thread,
                                                              const handle completion_port, const uint64_t key)
     {
+        if (this->completion_association_)
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        if (!completion_port.bits)
+        {
+            return STATUS_INVALID_HANDLE;
+        }
+
+        return this->replace_completion_association(process, active_thread, completion_port, key);
+    }
+
+    NTSTATUS io_device_container::replace_completion_association(process_context& process, const emulator_thread* active_thread,
+                                                                 const handle completion_port, const uint64_t key)
+    {
+        if (!completion_port.bits)
+        {
+            if (this->completion_association_)
+            {
+                io_completion_wait::release_handle_reference(process, this->completion_association_->completion_port);
+                this->completion_association_ = {};
+            }
+
+            return STATUS_SUCCESS;
+        }
+
         const auto resolved_completion_port = process.resolve_object_pseudo_handle(completion_port, active_thread);
         if (resolved_completion_port.value.type != handle_types::io_completion || !process.io_completions.get(resolved_completion_port))
         {

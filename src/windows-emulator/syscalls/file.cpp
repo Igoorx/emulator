@@ -148,6 +148,18 @@ namespace sogen
                     return device->set_completion_association(c.proc, c.vcpu.active_thread, completion_port, completion_key);
                 }
 
+                if (info_class == FileReplaceCompletionInformation)
+                {
+                    if (length < sizeof(handle) + sizeof(uint64_t))
+                    {
+                        return STATUS_INFO_LENGTH_MISMATCH;
+                    }
+
+                    const auto completion_port = c.emu.read_memory<handle>(file_information);
+                    const auto completion_key = c.emu.read_memory<uint64_t>(file_information + sizeof(handle));
+                    return device->replace_completion_association(c.proc, c.vcpu.active_thread, completion_port, completion_key);
+                }
+
                 if (info_class == FileIoCompletionNotificationInformation)
                 {
                     if (length < sizeof(ULONG))
