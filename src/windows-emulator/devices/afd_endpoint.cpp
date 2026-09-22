@@ -376,6 +376,12 @@ namespace sogen
                 std::unique_ptr<network::i_socket> accepted_socket;
             };
 
+            struct pending_receive
+            {
+                emulator_pointer buffer{};
+                ULONG length{};
+            };
+
             std::unique_ptr<network::i_socket> s_{};
 
             bool executing_delayed_ioctl_{};
@@ -384,6 +390,7 @@ namespace sogen
             std::optional<io_device_context> delayed_ioctl_{};
             std::optional<std::chrono::steady_clock::time_point> timeout_{};
             std::optional<std::function<void(windows_emulator&, const io_device_context&)>> timeout_callback_{};
+            std::optional<pending_receive> pending_receive_{};
 
             std::unordered_map<LONG, pending_connection> pending_connections_{};
             LONG next_sequence_{0};
@@ -466,6 +473,7 @@ namespace sogen
                 this->timeout_callback_ = {};
                 this->timeout_ = {};
                 this->require_poll_ = {};
+                this->pending_receive_ = {};
                 this->delayed_ioctl_ = {};
             }
 
@@ -660,6 +668,7 @@ namespace sogen
 
                 buffer.read_optional(this->require_poll_);
                 buffer.read_optional(this->delayed_ioctl_);
+                buffer.read_optional(this->pending_receive_);
                 buffer.read_optional(this->timeout_);
                 buffer.read(this->non_blocking_);
                 buffer.read(this->shared_context_);
@@ -670,6 +679,7 @@ namespace sogen
                 buffer.write_optional(this->creation_data);
                 buffer.write_optional(this->require_poll_);
                 buffer.write_optional(this->delayed_ioctl_);
+                buffer.write_optional(this->pending_receive_);
                 buffer.write_optional(this->timeout_);
                 buffer.write(this->non_blocking_);
                 buffer.write(this->shared_context_);
@@ -952,26 +962,41 @@ namespace sogen
 
                 auto& emu = win_emu.emu();
 
-                if (c.input_buffer_length < sizeof(AFD_RECV_INFO<Traits>))
+                pending_receive receive{};
+                if (this->executing_delayed_ioctl_)
                 {
-                    return STATUS_BUFFER_TOO_SMALL;
+                    if (!this->pending_receive_)
+                    {
+                        return STATUS_INVALID_PARAMETER;
+                    }
+
+                    receive = *this->pending_receive_;
+                }
+                else
+                {
+                    if (c.input_buffer_length < sizeof(AFD_RECV_INFO<Traits>))
+                    {
+                        return STATUS_BUFFER_TOO_SMALL;
+                    }
+
+                    const auto receive_info = emu.read_memory<AFD_RECV_INFO<Traits>>(c.input_buffer);
+                    if (!receive_info.BufferArray || receive_info.BufferCount == 0)
+                    {
+                        return STATUS_INVALID_PARAMETER;
+                    }
+
+                    if (receive_info.BufferCount > 1)
+                    {
+                        // TODO: Scatter/Gather
+                        return STATUS_NOT_SUPPORTED;
+                    }
+
+                    const auto wsabuf = emu.read_memory<EMU_WSABUF<Traits>>(receive_info.BufferArray);
+                    receive.buffer = static_cast<emulator_pointer>(wsabuf.buf);
+                    receive.length = wsabuf.len;
                 }
 
-                const auto receive_info = emu.read_memory<AFD_RECV_INFO<Traits>>(c.input_buffer);
-
-                if (!receive_info.BufferArray || receive_info.BufferCount == 0)
-                {
-                    return STATUS_INVALID_PARAMETER;
-                }
-
-                if (receive_info.BufferCount > 1)
-                {
-                    // TODO: Scatter/Gather
-                    return STATUS_NOT_SUPPORTED;
-                }
-
-                const auto wsabuf = emu.read_memory<EMU_WSABUF<Traits>>(receive_info.BufferArray);
-                if (!wsabuf.buf || wsabuf.len == 0)
+                if (!receive.buffer || receive.length == 0)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
@@ -981,7 +1006,7 @@ namespace sogen
                 // recv has partial-read semantics, so the guest simply reads the rest on the next call.
                 constexpr size_t max_stream_transfer_bytes = 64u << 20;
                 std::vector<std::byte> host_buffer;
-                host_buffer.resize(std::min<size_t>(wsabuf.len, max_stream_transfer_bytes));
+                host_buffer.resize(std::min<size_t>(receive.length, max_stream_transfer_bytes));
 
                 const auto bytes_received = this->s_->recv(host_buffer);
 
@@ -990,7 +1015,14 @@ namespace sogen
                     const auto error = this->s_->get_last_error();
                     if (error == SERR(EWOULDBLOCK))
                     {
-                        return this->pend_or_would_block(c, true);
+                        if (this->non_blocking_)
+                        {
+                            return STATUS_DEVICE_NOT_READY;
+                        }
+
+                        this->pending_receive_ = receive;
+                        this->delay_ioctrl(c, true);
+                        return STATUS_PENDING;
                     }
 
                     if (error == SERR(ECONNRESET))
@@ -1001,7 +1033,7 @@ namespace sogen
                     return STATUS_UNSUCCESSFUL;
                 }
 
-                emu.write_memory(wsabuf.buf, host_buffer.data(), static_cast<size_t>(bytes_received));
+                emu.write_memory(receive.buffer, host_buffer.data(), static_cast<size_t>(bytes_received));
 
                 if (c.io_status_block)
                 {
