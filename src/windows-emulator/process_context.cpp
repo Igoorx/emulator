@@ -1253,6 +1253,31 @@ namespace sogen
 
             win_emu.ui().present_surface(win.handle, make_window_surface_desc(surface->second, &win));
         }
+        for (const auto& [handle, thread] : this->threads)
+        {
+            if (thread.caret_window && thread.caret_hide_count == 0)
+            {
+                this->update_caret(win_emu.ui(), thread, true);
+            }
+        }
+    }
+
+    void process_context::update_caret(ui_backend& ui, const emulator_thread& thread, const bool visible) const
+    {
+        const auto* win = this->windows.get(thread.caret_window);
+        auto rect = thread.caret_rect;
+        while (win && (win->style & WS_CHILD) != 0)
+        {
+            rect.left += win->x;
+            rect.right += win->x;
+            rect.top += win->y;
+            rect.bottom += win->y;
+            win = this->windows.get(win->parent_handle);
+        }
+        if (win)
+        {
+            ui.set_caret(win->handle, visible ? std::optional{rect} : std::nullopt);
+        }
     }
 
     generic_handle_store* process_context::get_handle_store(const handle handle)

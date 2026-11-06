@@ -444,6 +444,7 @@ namespace sogen
         // Deadlines the guest gave as absolute system times move earlier by the system time that went on while steady
         // time did not.
         void move_absolute_deadlines(std::chrono::steady_clock::duration system_time_ahead);
+        void update_caret(ui_backend& ui, const emulator_thread& thread, bool visible) const;
 
         generic_handle_store* get_handle_store(handle handle);
         size_t handle_count() const;

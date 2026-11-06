@@ -501,11 +501,34 @@ namespace sogen
                                     const bool repaint)
         {
             const bool geometry_changed = win.x != x || win.y != y || win.width != width || win.height != height;
+            const bool child_moved = (win.style & WS_CHILD) != 0 && (win.x != x || win.y != y);
             win.x = x;
             win.y = y;
             win.width = width;
             win.height = height;
             c.proc.sync_guest_window_rects(win);
+
+            if (child_moved)
+            {
+                for (const auto& [handle, thread] : c.proc.threads)
+                {
+                    if (!thread.caret_window || thread.caret_hide_count != 0)
+                    {
+                        continue;
+                    }
+
+                    auto* caret_window = c.proc.windows.get(thread.caret_window);
+                    while (caret_window && (caret_window->style & WS_CHILD) != 0)
+                    {
+                        if (caret_window->handle == win.handle)
+                        {
+                            c.proc.update_caret(c.win_emu.ui(), thread, true);
+                            break;
+                        }
+                        caret_window = c.proc.windows.get(caret_window->parent_handle);
+                    }
+                }
+            }
 
             if (win.host_surface_window)
             {
@@ -7884,28 +7907,83 @@ namespace sogen
             return static_cast<int32_t>(previous_state);
         }
 
-        BOOL handle_NtUserCreateCaret()
+        void update_caret(const syscall_context& c, const bool visible)
         {
+            c.proc.update_caret(c.win_emu.ui(), c.thread(), visible);
+        }
+
+        BOOL handle_NtUserCreateCaret(const syscall_context& c, const hwnd window, const uint64_t bitmap, const int32_t width,
+                                      const int32_t height)
+        {
+            auto& thread = c.thread();
+            const auto* win = c.proc.windows.get(window);
+            if (!win || win->thread_id != thread.id || bitmap > 1)
+            {
+                return FALSE;
+            }
+            if (thread.caret_window)
+            {
+                update_caret(c, false);
+            }
+            thread.caret_window = window;
+            thread.caret_rect = {0, 0, std::max(1, width), std::max(1, height)};
+            thread.caret_hide_count = 1;
             return TRUE;
         }
 
-        BOOL handle_NtUserDestroyCaret()
+        BOOL handle_NtUserDestroyCaret(const syscall_context& c)
         {
+            auto& thread = c.thread();
+            if (!thread.caret_window)
+            {
+                return FALSE;
+            }
+            update_caret(c, false);
+            thread.caret_window = 0;
+            thread.caret_rect = {};
+            thread.caret_hide_count = 0;
             return TRUE;
         }
 
-        BOOL handle_NtUserSetCaretPos()
+        BOOL handle_NtUserSetCaretPos(const syscall_context& c, const int32_t x, const int32_t y)
         {
+            auto& thread = c.thread();
+            if (!thread.caret_window)
+            {
+                return FALSE;
+            }
+            const auto width = thread.caret_rect.right - thread.caret_rect.left;
+            const auto height = thread.caret_rect.bottom - thread.caret_rect.top;
+            thread.caret_rect = {x, y, x + width, y + height};
+            update_caret(c, thread.caret_hide_count == 0);
             return TRUE;
         }
 
-        BOOL handle_NtUserShowCaret()
+        BOOL handle_NtUserShowCaret(const syscall_context& c, const hwnd window)
         {
+            auto& thread = c.thread();
+            if (!thread.caret_window || (window && window != thread.caret_window))
+            {
+                return FALSE;
+            }
+            if (thread.caret_hide_count > 0 && --thread.caret_hide_count == 0)
+            {
+                update_caret(c, true);
+            }
             return TRUE;
         }
 
-        BOOL handle_NtUserHideCaret()
+        BOOL handle_NtUserHideCaret(const syscall_context& c, const hwnd window)
         {
+            auto& thread = c.thread();
+            if (!thread.caret_window || (window && window != thread.caret_window))
+            {
+                return FALSE;
+            }
+            if (thread.caret_hide_count++ == 0)
+            {
+                update_caret(c, false);
+            }
             return TRUE;
         }
 
@@ -9357,7 +9435,12 @@ namespace sogen
             {
                 return FALSE;
             }
-            info = {.cbSize = sizeof(info), .hwndActive = active, .hwndFocus = target_thread->focus_window, .hwndCapture = capture};
+            info = {.cbSize = sizeof(info),
+                    .hwndActive = active,
+                    .hwndFocus = target_thread->focus_window,
+                    .hwndCapture = capture,
+                    .hwndCaret = target_thread->caret_window,
+                    .rcCaret = target_thread->caret_rect};
             c.emu.write_memory(info_address, info);
 
             return TRUE;

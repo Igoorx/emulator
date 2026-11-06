@@ -680,6 +680,9 @@ namespace sogen
                 ui_surface_desc popup_surface{};
                 std::vector<uint8_t> popup_pixels{};
                 std::optional<std::pair<int, int>> placed_position{};
+                std::optional<RECT> caret{};
+                uint64_t caret_started{};
+                bool caret_visible{};
             };
 
             struct pending_key_release
@@ -760,6 +763,19 @@ namespace sogen
                 }
 
                 this->deliver_pending_key_releases();
+
+                for (auto& [guest, state] : this->windows_)
+                {
+                    if (state.caret)
+                    {
+                        const bool visible = ((SDL_GetTicks() - state.caret_started) / 530) % 2 == 0;
+                        if (visible != state.caret_visible)
+                        {
+                            state.caret_visible = visible;
+                            render_window(state);
+                        }
+                    }
+                }
 
                 SDL_Event event{};
                 while (SDL_PollEvent(&event))
@@ -1629,6 +1645,19 @@ namespace sogen
                 });
             }
 
+            void set_caret(const hwnd window, const std::optional<RECT>& rect) override
+            {
+                this->queue_or_run([this, window, rect] {
+                    if (auto* state = this->resolve_window(window))
+                    {
+                        state->caret = rect;
+                        state->caret_started = SDL_GetTicks();
+                        state->caret_visible = rect.has_value();
+                        render_window(*state);
+                    }
+                });
+            }
+
             void set_cursor_position(const hwnd window, const int32_t screen_x, const int32_t screen_y) override
             {
                 this->queue_or_run([this, window, screen_x, screen_y] {
@@ -2085,6 +2114,14 @@ namespace sogen
                     SDL_SetRenderDrawColor(state.renderer, 0, 0, 0, state.translucent ? 0 : 255);
                     SDL_RenderClear(state.renderer);
                     SDL_RenderTexture(state.renderer, state.texture, nullptr, nullptr);
+                    if (state.caret && state.caret_visible)
+                    {
+                        const auto& rect = *state.caret;
+                        const SDL_FRect caret{static_cast<float>(rect.left), static_cast<float>(rect.top),
+                                              static_cast<float>(rect.right - rect.left), static_cast<float>(rect.bottom - rect.top)};
+                        SDL_SetRenderDrawColor(state.renderer, 0, 0, 0, 255);
+                        SDL_RenderFillRect(state.renderer, &caret);
+                    }
                     SDL_RenderPresent(state.renderer);
                     return;
                 }
