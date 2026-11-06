@@ -709,6 +709,7 @@ namespace sogen
 
             void reset() override
             {
+                ui_backend::reset();
                 ++this->cursor_generation_;
                 this->clear_system_cursors();
                 for (auto& [guest, state] : this->windows_)
@@ -1462,6 +1463,7 @@ namespace sogen
 
             void destroy_window(const hwnd window) override
             {
+                ui_backend::destroy_window(window);
                 this->queue_or_run([this, window] {
                     if (const auto it = this->windows_.find(window); it != this->windows_.end())
                     {
@@ -1592,7 +1594,7 @@ namespace sogen
                 });
             }
 
-            void present_surface(const hwnd window, const ui_surface_desc& surface) override
+            void render_surface(const hwnd window, const ui_surface_desc& surface) override
             {
                 // The queued command runs on the pump thread after this call returns, by which point the
                 // guest's pixel buffer may be gone, so take a private copy of it now.

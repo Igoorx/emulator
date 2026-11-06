@@ -80,7 +80,6 @@ namespace sogen::android
         void set_window_visible(hwnd window, bool visible) override;
         void set_window_title(hwnd window, std::u16string_view title) override;
         void set_window_relationship(hwnd window, hwnd parent, hwnd owner, bool top_level) override;
-        void present_surface(hwnd window, const ui_surface_desc& surface) override;
         void set_cursor_position(hwnd window, int32_t screen_x, int32_t screen_y) override;
         void set_cursor_clip(hwnd window, const std::optional<ui_rect>& screen_rect, bool relative) override;
         void set_cursor_visibility(bool visible) override;
@@ -89,6 +88,9 @@ namespace sogen::android
         uint64_t create_vulkan_surface(hwnd window, uint64_t instance) override;
         void* vulkan_get_instance_proc_addr() override;
         std::optional<ui_extent> vulkan_surface_extent(hwnd window) override;
+
+      protected:
+        void render_surface(hwnd window, const ui_surface_desc& surface) override;
 
       private:
         struct window_state

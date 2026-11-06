@@ -2,11 +2,16 @@
 
 #include "window.hpp"
 
+#include <algorithm>
+#include <chrono>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace sogen
@@ -104,29 +109,30 @@ namespace sogen
     class ui_backend
     {
       public:
+        using clock = std::chrono::steady_clock;
+
+        explicit ui_backend(std::function<clock::time_point()> now = clock::now);
+
         using event_sink = std::function<void(const ui_event&)>;
 
         virtual ~ui_backend() = default;
 
         virtual void set_event_sink(event_sink sink) = 0;
         virtual void pump_events() = 0;
+        void update_caret_blink();
 
         // Called when the user asks the host to save the process, with input the guest never receives.
         virtual void set_snapshot_request_sink(const std::function<void()>& /*sink*/)
         {
         }
 
-        virtual void reset()
-        {
-        }
+        virtual void reset();
 
         virtual void create_window(const ui_window_desc& /*desc*/)
         {
         }
 
-        virtual void destroy_window(const hwnd /*window*/)
-        {
-        }
+        virtual void destroy_window(hwnd window);
 
         // SetParent moved the window. A window that is now top-level shows in a host window of its own, kept with its owner;
         // otherwise it is drawn as part of its parent.
@@ -154,9 +160,8 @@ namespace sogen
         {
         }
 
-        virtual void present_surface(const hwnd /*window*/, const ui_surface_desc& /*surface*/)
-        {
-        }
+        void present_surface(hwnd window, const ui_surface_desc& surface);
+        void set_caret(hwnd window, const std::optional<RECT>& rect);
 
         // These two wait for the UI thread, which takes the emulator's kernel lock to deliver input. Callers must not
         // hold it.
@@ -209,7 +214,125 @@ namespace sogen
         virtual void set_cursor_clip(const hwnd /*window*/, const std::optional<ui_rect>& /*screen_rect*/, const bool /*relative*/)
         {
         }
+
+      protected:
+        virtual void render_surface(const hwnd /*window*/, const ui_surface_desc& /*surface*/)
+        {
+        }
+
+      private:
+        struct window_surface
+        {
+            ui_surface_desc desc{};
+            std::vector<uint8_t> pixels{};
+            std::vector<uint8_t> composed_pixels{};
+            std::optional<RECT> caret{};
+            clock::time_point caret_started{};
+            bool caret_visible{};
+        };
+
+        void present_composed_surface(hwnd window, window_surface& surface);
+
+        std::function<clock::time_point()> now_;
+        std::mutex surface_mutex_{};
+        std::unordered_map<hwnd, window_surface> surfaces_{};
     };
+
+    inline ui_backend::ui_backend(std::function<clock::time_point()> now)
+        : now_(std::move(now))
+    {
+    }
+
+    inline void ui_backend::present_surface(const hwnd window, const ui_surface_desc& surface)
+    {
+        if (!surface.pixels || surface.width <= 0 || surface.height <= 0 || surface.stride <= 0 ||
+            static_cast<size_t>(surface.stride) < static_cast<size_t>(surface.width) * 4)
+        {
+            return;
+        }
+
+        const std::lock_guard lock(this->surface_mutex_);
+        auto& state = this->surfaces_[window];
+        state.desc = surface;
+        state.desc.pixels = nullptr;
+        const auto* pixels = static_cast<const uint8_t*>(surface.pixels);
+        state.pixels.assign(pixels, pixels + static_cast<size_t>(surface.stride) * static_cast<size_t>(surface.height));
+        this->present_composed_surface(window, state);
+    }
+
+    inline void ui_backend::set_caret(const hwnd window, const std::optional<RECT>& rect)
+    {
+        const std::lock_guard lock(this->surface_mutex_);
+        auto& state = this->surfaces_[window];
+        state.caret = rect;
+        state.caret_started = this->now_();
+        state.caret_visible = rect.has_value();
+        this->present_composed_surface(window, state);
+    }
+
+    inline void ui_backend::update_caret_blink()
+    {
+        const std::lock_guard lock(this->surface_mutex_);
+        const auto now = this->now_();
+        for (auto& [window, state] : this->surfaces_)
+        {
+            if (!state.caret)
+            {
+                continue;
+            }
+            const bool visible = ((now - state.caret_started) / std::chrono::milliseconds(530)) % 2 == 0;
+            if (visible != state.caret_visible)
+            {
+                state.caret_visible = visible;
+                this->present_composed_surface(window, state);
+            }
+        }
+    }
+
+    inline void ui_backend::destroy_window(const hwnd window)
+    {
+        const std::lock_guard lock(this->surface_mutex_);
+        this->surfaces_.erase(window);
+    }
+
+    inline void ui_backend::reset()
+    {
+        const std::lock_guard lock(this->surface_mutex_);
+        this->surfaces_.clear();
+    }
+
+    inline void ui_backend::present_composed_surface(const hwnd window, window_surface& surface)
+    {
+        if (surface.pixels.empty())
+        {
+            return;
+        }
+
+        auto desc = surface.desc;
+        desc.pixels = surface.pixels.data();
+        if (surface.caret && surface.caret_visible)
+        {
+            surface.composed_pixels = surface.pixels;
+            const auto& rect = *surface.caret;
+            const auto left = std::clamp<int>(rect.left, 0, desc.width);
+            const auto top = std::clamp<int>(rect.top, 0, desc.height);
+            const auto right = std::clamp<int>(rect.right, 0, desc.width);
+            const auto bottom = std::clamp<int>(rect.bottom, 0, desc.height);
+            for (int y = top; y < bottom; ++y)
+            {
+                for (int x = left; x < right; ++x)
+                {
+                    const auto offset = static_cast<size_t>(y) * static_cast<size_t>(desc.stride) + static_cast<size_t>(x) * 4;
+                    for (size_t channel = 0; channel < 3; ++channel)
+                    {
+                        surface.composed_pixels[offset + channel] ^= 0xff;
+                    }
+                }
+            }
+            desc.pixels = surface.composed_pixels.data();
+        }
+        this->render_surface(window, desc);
+    }
 
     class null_ui_backend final : public ui_backend
     {
@@ -219,10 +342,6 @@ namespace sogen
         }
 
         void pump_events() override
-        {
-        }
-
-        void reset() override
         {
         }
     };

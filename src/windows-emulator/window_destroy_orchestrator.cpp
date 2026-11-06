@@ -10,7 +10,7 @@ namespace sogen
           emu_(c.emu),
           proc_(c.proc),
           thread_(c.thread()),
-          graphics_(c.win_emu.graphics())
+          ui_(c.win_emu.ui())
     {
     }
 
@@ -337,7 +337,7 @@ namespace sogen
         {
             if (owner->caret_window == frame.handle)
             {
-                this->proc_.update_caret(this->graphics_, *owner, false);
+                this->proc_.update_caret(this->ui_, *owner, false);
                 owner->caret_window = 0;
                 owner->caret_rect = {};
                 owner->caret_hide_count = 0;
@@ -354,7 +354,7 @@ namespace sogen
             guest_win.spwndPrev = 0;
         });
 
-        this->graphics_.destroy_window(frame.handle);
+        this->ui_.destroy_window(frame.handle);
         this->proc_.release_mouse_capture(frame.handle);
         this->proc_.gdi_window_surfaces.erase(static_cast<uint32_t>(frame.handle));
         (void)this->proc_.windows.erase(frame.handle);

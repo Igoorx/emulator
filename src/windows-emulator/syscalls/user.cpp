@@ -522,7 +522,7 @@ namespace sogen
                     {
                         if (caret_window->handle == win.handle)
                         {
-                            c.proc.update_caret(c.win_emu.graphics(), thread, true);
+                            c.proc.update_caret(c.win_emu.ui(), thread, true);
                             break;
                         }
                         caret_window = c.proc.windows.get(caret_window->parent_handle);
@@ -1157,7 +1157,7 @@ namespace sogen
                 return;
             }
 
-            c.win_emu.graphics().present_surface(top_level->handle, make_window_surface_desc(surface, top_level));
+            c.win_emu.ui().present_surface(top_level->handle, make_window_surface_desc(surface, top_level));
         }
 
         void dispatch_cbt_create_window(const syscall_context& c, window_create_state&& state, const window& win,
@@ -2343,8 +2343,7 @@ namespace sogen
             if (auto* surface = get_dc_present_surface(c, dc, present_handle);
                 surface && present_handle != 0 && surface->width > 0 && surface->height > 0 && !surface->pixels.empty())
             {
-                c.win_emu.graphics().present_surface(present_handle,
-                                                     make_window_surface_desc(*surface, c.proc.windows.get(present_handle)));
+                c.win_emu.ui().present_surface(present_handle, make_window_surface_desc(*surface, c.proc.windows.get(present_handle)));
             }
 
             (void)handle_NtGdiDeleteObjectApp(c, static_cast<uint32_t>(dc));
@@ -2881,8 +2880,7 @@ namespace sogen
                 if (auto* surface = get_dc_present_surface(c, ps.paint_hdc, present_handle);
                     surface && present_handle != 0 && surface->width > 0 && surface->height > 0 && !surface->pixels.empty())
                 {
-                    c.win_emu.graphics().present_surface(present_handle,
-                                                         make_window_surface_desc(*surface, c.proc.windows.get(present_handle)));
+                    c.win_emu.ui().present_surface(present_handle, make_window_surface_desc(*surface, c.proc.windows.get(present_handle)));
                 }
 
                 // BeginPaint allocated a fresh GDI DC (handle table entry + DC_ATTR block) via
@@ -4693,7 +4691,7 @@ namespace sogen
                 if (c.get_callback_result<lresult>() != 0)
                 {
                     release_window_create_allocations();
-                    c.win_emu.graphics().destroy_window(win->handle);
+                    c.win_emu.ui().destroy_window(win->handle);
                     c.proc.release_mouse_capture(win->handle);
                     c.proc.gdi_window_surfaces.erase(static_cast<uint32_t>(win->handle));
                     (void)c.proc.windows.erase(s.handle);
@@ -7911,7 +7909,7 @@ namespace sogen
 
         void update_caret(const syscall_context& c, const bool visible)
         {
-            c.proc.update_caret(c.win_emu.graphics(), c.thread(), visible);
+            c.proc.update_caret(c.win_emu.ui(), c.thread(), visible);
         }
 
         BOOL handle_NtUserCreateCaret(const syscall_context& c, const hwnd window, const uint64_t bitmap, const int32_t width,

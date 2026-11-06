@@ -29,7 +29,6 @@
 #include <platform/crypt_protect_backend.hpp>
 #include <platform/console_backend.hpp>
 #include <platform/ui_backend.hpp>
-#include "window_compositor.hpp"
 
 namespace sogen
 {
@@ -260,7 +259,6 @@ namespace sogen
         std::unique_ptr<network::dns_lookup> dns_lookup_{};
         std::unique_ptr<network::socket_factory> socket_factory_{};
         std::unique_ptr<ui_backend> ui_backend_{};
-        window_compositor graphics_;
         frame_pacer frame_pacer_{};
         std::unique_ptr<audio_backend> audio_backend_{};
         std::unique_ptr<steam_backend> steam_backend_{};
@@ -404,11 +402,6 @@ namespace sogen
         const network::socket_factory& socket_factory() const
         {
             return *this->socket_factory_;
-        }
-
-        window_compositor& graphics()
-        {
-            return this->graphics_;
         }
 
         ui_backend& ui()

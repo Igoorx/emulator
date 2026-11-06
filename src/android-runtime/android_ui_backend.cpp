@@ -529,6 +529,7 @@ namespace sogen::android
 
     void android_ui_backend::reset()
     {
+        ui_backend::reset();
         const std::lock_guard lock{this->mutex_};
 
         this->release_surfaces();
@@ -568,6 +569,7 @@ namespace sogen::android
 
     void android_ui_backend::destroy_window(const hwnd window)
     {
+        ui_backend::destroy_window(window);
         bool top_level{};
         hwnd owner{};
 
@@ -757,7 +759,7 @@ namespace sogen::android
         this->host_->on_window_title_changed(window, title);
     }
 
-    void android_ui_backend::present_surface(const hwnd window, const ui_surface_desc& surface)
+    void android_ui_backend::render_surface(const hwnd window, const ui_surface_desc& surface)
     {
         if (!surface.pixels || surface.width <= 0 || surface.height <= 0 || surface.stride <= 0)
         {

@@ -10,7 +10,7 @@ namespace sogen
 {
 
     struct syscall_context;
-    class window_compositor;
+    class ui_backend;
     struct process_context;
     class emulator_thread;
 
@@ -41,7 +41,7 @@ namespace sogen
         guest_cpu& emu_;
         process_context& proc_;
         emulator_thread& thread_;
-        window_compositor& graphics_;
+        ui_backend& ui_;
     };
 
 } // namespace sogen

@@ -288,6 +288,7 @@ namespace sogen
 
             void reset() override
             {
+                ui_backend::reset();
                 {
                     std::scoped_lock lock{g_web_ui_event_mutex};
                     g_web_ui_events.clear();
@@ -310,6 +311,7 @@ namespace sogen
 
             void destroy_window(const hwnd window) override
             {
+                ui_backend::destroy_window(window);
                 post_ui_message("destroy_window", window);
             }
 
@@ -350,7 +352,7 @@ namespace sogen
                 }
             }
 
-            void present_surface(const hwnd window, const ui_surface_desc& surface) override
+            void render_surface(const hwnd window, const ui_surface_desc& surface) override
             {
                 post_ui_present_surface(window, surface);
             }

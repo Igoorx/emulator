@@ -26,7 +26,7 @@ namespace sogen::test
             {
             }
 
-            void present_surface(const hwnd target, const ui_surface_desc& surface) override
+            void render_surface(const hwnd target, const ui_surface_desc& surface) override
             {
                 this->window = target;
                 this->caret.reset();
@@ -91,7 +91,7 @@ namespace sogen::test
                 child_window.parent_handle = parent;
                 thread->set_focus_window(child);
                 const std::vector<uint32_t> pixels(500 * 500, 0xffffffff);
-                emu->graphics().present_surface(parent, {.width = 500, .height = 500, .stride = 500 * 4, .pixels = pixels.data()});
+                emu->ui().present_surface(parent, {.width = 500, .height = 500, .stride = 500 * 4, .pixels = pixels.data()});
             }
 
             std::unique_ptr<windows_emulator> emu{};
