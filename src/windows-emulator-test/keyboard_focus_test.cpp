@@ -26,10 +26,32 @@ namespace sogen::test
             {
             }
 
-            void set_caret(const hwnd target, const std::optional<RECT>& rect) override
+            void present_surface(const hwnd target, const ui_surface_desc& surface) override
             {
                 this->window = target;
-                this->caret = rect;
+                this->caret.reset();
+                const auto* pixels = static_cast<const uint8_t*>(surface.pixels);
+                for (int y = 0; y < surface.height; ++y)
+                {
+                    for (int x = 0; x < surface.width; ++x)
+                    {
+                        if (pixels[static_cast<size_t>(y) * surface.stride + static_cast<size_t>(x) * 4] != 0)
+                        {
+                            continue;
+                        }
+                        if (!this->caret)
+                        {
+                            this->caret = RECT{x, y, x + 1, y + 1};
+                        }
+                        else
+                        {
+                            this->caret->left = std::min<LONG>(this->caret->left, x);
+                            this->caret->top = std::min<LONG>(this->caret->top, y);
+                            this->caret->right = std::max<LONG>(this->caret->right, x + 1);
+                            this->caret->bottom = std::max<LONG>(this->caret->bottom, y + 1);
+                        }
+                    }
+                }
             }
 
             hwnd window{};
@@ -68,6 +90,8 @@ namespace sogen::test
                 child_window.thread_id = thread->id;
                 child_window.parent_handle = parent;
                 thread->set_focus_window(child);
+                const std::vector<uint32_t> pixels(500 * 500, 0xffffffff);
+                emu->graphics().present_surface(parent, {.width = 500, .height = 500, .stride = 500 * 4, .pixels = pixels.data()});
             }
 
             std::unique_ptr<windows_emulator> emu{};
