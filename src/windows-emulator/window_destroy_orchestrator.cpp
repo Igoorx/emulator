@@ -335,6 +335,13 @@ namespace sogen
         this->thread_.remove_window_messages(frame.handle);
         if (auto* owner = this->proc_.find_thread_by_id(win.thread_id))
         {
+            if (owner->caret_window == frame.handle)
+            {
+                this->proc_.update_caret(this->ui_, *owner, false);
+                owner->caret_window = 0;
+                owner->caret_rect = {};
+                owner->caret_hide_count = 0;
+            }
             owner->forget_window(frame.handle);
         }
 

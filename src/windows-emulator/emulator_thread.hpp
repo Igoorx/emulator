@@ -476,6 +476,9 @@ namespace sogen
         std::optional<emulator_object<USER_CLIENTTHREADINFO>> client_thread_info;
         hwnd active_window{};
         hwnd focus_window{};
+        hwnd caret_window{};
+        RECT caret_rect{};
+        uint32_t caret_hide_count{};
 
         std::vector<std::byte> last_registers{};
 
@@ -633,6 +636,9 @@ namespace sogen
             buffer.write_optional(this->client_thread_info);
             buffer.write(this->active_window);
             buffer.write(this->focus_window);
+            buffer.write(this->caret_window);
+            buffer.write(this->caret_rect);
+            buffer.write(this->caret_hide_count);
 
             buffer.write_vector(this->last_registers);
 
@@ -718,6 +724,9 @@ namespace sogen
             buffer.read_optional(this->client_thread_info, [this] { return emulator_object<USER_CLIENTTHREADINFO>(*this->memory_ptr); });
             buffer.read(this->active_window);
             buffer.read(this->focus_window);
+            buffer.read(this->caret_window);
+            buffer.read(this->caret_rect);
+            buffer.read(this->caret_hide_count);
 
             buffer.read_vector(this->last_registers);
 

@@ -435,6 +435,7 @@ namespace sogen
         void prepare_for_state_restore(windows_emulator& win_emu);
         void restore_after_state_restore(windows_emulator& win_emu);
         void restore_windows_after_state_restore(windows_emulator& win_emu);
+        void update_caret(ui_backend& ui, const emulator_thread& thread, bool visible) const;
 
         generic_handle_store* get_handle_store(handle handle);
         size_t handle_count() const;

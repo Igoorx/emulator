@@ -804,11 +804,11 @@ namespace sogen
         BOOL handle_NtUserDrawMenuBar(const syscall_context& c, hwnd hwnd);
         int32_t handle_NtUserEnableMenuItem(const syscall_context& c, hmenu menu, UINT item, UINT enable);
         int32_t handle_NtUserCheckMenuItem(const syscall_context& c, hmenu menu, UINT item, UINT check);
-        BOOL handle_NtUserCreateCaret();
-        BOOL handle_NtUserDestroyCaret();
-        BOOL handle_NtUserSetCaretPos();
-        BOOL handle_NtUserShowCaret();
-        BOOL handle_NtUserHideCaret();
+        BOOL handle_NtUserCreateCaret(const syscall_context& c, hwnd window, uint64_t bitmap, int32_t width, int32_t height);
+        BOOL handle_NtUserDestroyCaret(const syscall_context& c);
+        BOOL handle_NtUserSetCaretPos(const syscall_context& c, int32_t x, int32_t y);
+        BOOL handle_NtUserShowCaret(const syscall_context& c, hwnd window);
+        BOOL handle_NtUserHideCaret(const syscall_context& c, hwnd window);
         BOOL handle_NtUserGetObjectInformation(const syscall_context& c, handle object, int index, emulator_pointer information,
                                                DWORD length, emulator_object<DWORD> needed);
         BOOL handle_NtUserGetWindowDisplayAffinity(const syscall_context& c, hwnd window, emulator_object<DWORD> affinity);
