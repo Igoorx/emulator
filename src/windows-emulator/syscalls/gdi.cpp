@@ -1079,7 +1079,8 @@ namespace sogen
                     return;
                 }
 
-                c.win_emu.ui().present_surface(present_handle, make_window_surface_desc(*surface, c.proc.windows.get(present_handle)));
+                c.win_emu.graphics().present_surface(present_handle,
+                                                     make_window_surface_desc(*surface, c.proc.windows.get(present_handle)));
             }
 
             void set_surface_pixel(gdi_bitmap_surface& surface, const int x, const int y, const uint32_t color)

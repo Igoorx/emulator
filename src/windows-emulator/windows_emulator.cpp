@@ -831,6 +831,7 @@ namespace sogen
           dns_lookup_(get_dns_lookup(interfaces, settings.network)),
           socket_factory_(get_socket_factory(interfaces, settings.network)),
           ui_backend_(get_ui_backend(interfaces)),
+          graphics_(*this->ui_backend_),
           audio_backend_(get_audio_backend(interfaces)),
           crypt_protect_backend_(get_crypt_protect_backend(
               interfaces, settings.emulation_root.empty() ? settings.emulation_root : absolute(settings.emulation_root))),
@@ -1028,6 +1029,7 @@ namespace sogen
             if (this->vcpu_count_ == 1)
             {
                 // With workers, the thread calling start() pumps UI events instead.
+                this->graphics_.pump();
                 this->ui_backend_->pump_events();
             }
 
@@ -1957,6 +1959,7 @@ namespace sogen
 
         if (this->vcpu_count_ > 1)
         {
+            this->graphics_.pump();
             this->ui_backend_->pump_events();
             // One worker thread per vCPU; this thread pumps UI events until the run ends.
             active_workers = this->vcpu_count_;
@@ -1981,6 +1984,7 @@ namespace sogen
 
             while (active_workers.load() > 0)
             {
+                this->graphics_.pump();
                 this->ui_backend_->pump_events();
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
@@ -1999,6 +2003,7 @@ namespace sogen
         while (!this->should_stop)
         {
             lock.unlock();
+            this->graphics_.pump();
             this->ui_backend_->pump_events();
             this->debugger_.run_pending_tasks(vcpu.cpu.index());
             lock.lock();
@@ -3020,7 +3025,7 @@ namespace sogen
         this->process.prepare_for_state_restore(*this);
         this->memory.unmap_all_memory();
         this->clear_section_first_execution_hooks();
-        this->ui().reset();
+        this->graphics_.reset();
         this->audio().stop();
         this->console().reset();
 
@@ -3144,7 +3149,7 @@ namespace sogen
         this->process.prepare_for_state_restore(*this);
         this->memory.unmap_all_memory();
         this->clear_section_first_execution_hooks();
-        this->ui().reset();
+        this->graphics_.reset();
         this->audio().stop();
         this->console().reset();
 
