@@ -592,6 +592,7 @@ namespace sogen
         BOOL handle_NtUserTransformPoint(const syscall_context& c, emulator_pointer point, uint32_t from_dpi, uint32_t to_dpi,
                                          uint32_t flags);
         int32_t handle_NtUserShowCursor(const syscall_context& c, BOOL show);
+        NTSTATUS handle_NtUserHideCursorNoCapture();
         uint32_t handle_NtUserGetKeyState(const syscall_context& c, int32_t virtual_key);
         uint32_t handle_NtUserGetAsyncKeyState(const syscall_context& c, int32_t virtual_key);
         BOOL handle_NtUserClipCursor(const syscall_context& c, emulator_pointer rect);
@@ -745,6 +746,7 @@ namespace sogen
         NTSTATUS handle_NtUserSetForegroundWindow();
         hwnd handle_NtUserGetForegroundWindow(const syscall_context& c);
         hwnd handle_NtUserSetFocus(const syscall_context& c, hwnd hwnd);
+        hwnd completion_NtUserSetFocus(const syscall_context& c, hwnd hwnd);
         BOOL handle_NtUserZapActiveAndFocus(const syscall_context& c);
         emulator_pointer handle_NtUserSetWindowLongPtr(const syscall_context& c, handle hWnd, int nIndex, emulator_pointer dwNewLong,
                                                        BOOL Ansi);
@@ -1897,6 +1899,7 @@ namespace sogen
         add_handler(NtUserGetClipCursor);
         add_handler(NtUserTransformPoint);
         add_handler(NtUserShowCursor);
+        add_handler(NtUserHideCursorNoCapture);
         add_handler(NtUserClipCursor);
         add_handler(NtUserGetWindowCompositionAttribute);
         add_handler(NtUserSetCursorPos);
@@ -2241,6 +2244,7 @@ namespace sogen
         add_callback(NtUserEndDeferWindowPosEx, deferred_window_position_state);
         add_callback(NtUserMessageCall, message_call_state);
         add_callback(NtUserGetComboBoxInfo, message_call_state);
+        add_callback(NtUserSetFocus, focus_change_state);
         add_callback(NtUserUpdateWindow, window_update_state);
         add_callback(NtUserGetMessage, get_message_hook_state);
         add_callback(NtUserPeekMessage, get_message_hook_state);

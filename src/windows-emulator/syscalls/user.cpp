@@ -2899,6 +2899,12 @@ namespace sogen
             return c.proc.cursor_show_count;
         }
 
+        NTSTATUS handle_NtUserHideCursorNoCapture()
+        {
+            // Mouse Vanish defaults to off and is not configurable in the emulated system.
+            return STATUS_SUCCESS;
+        }
+
         hcursor handle_NtUserSetCursor(const syscall_context& c, const hcursor cursor)
         {
             // SetCursor(NULL) removes the cursor shape (hides it); a non-null handle restores it.
@@ -6063,17 +6069,48 @@ namespace sogen
 
         hwnd handle_NtUserSetFocus(const syscall_context& c, const hwnd hwnd)
         {
-            if (hwnd != 0 && !c.proc.windows.get(hwnd))
+            const auto* target = hwnd != 0 ? c.proc.windows.get(hwnd) : nullptr;
+            if (hwnd != 0 && (!target || target->thread_id != c.thread().id || (target->style & WS_DISABLED) != 0))
             {
                 return 0;
             }
 
             auto& thread = c.thread();
             const auto previous = thread.focus_window;
-            thread.set_focus_window(hwnd);
-            if (hwnd != 0)
+            if (previous == hwnd)
             {
-                set_thread_window_context(c, hwnd);
+                return previous;
+            }
+            thread.set_focus_window(hwnd);
+            focus_change_state state{};
+            state.previous = previous;
+            state.target = hwnd;
+            if (const auto* old_window = c.proc.windows.get(previous))
+            {
+                dispatch_window_message(c, callback_id::NtUserSetFocus, std::move(state), *old_window, WM_KILLFOCUS, hwnd);
+                return {};
+            }
+            if (target)
+            {
+                state.sent_new_focus = true;
+                dispatch_window_message(c, callback_id::NtUserSetFocus, std::move(state), *target, WM_SETFOCUS, previous);
+                return {};
+            }
+            return previous;
+        }
+
+        hwnd completion_NtUserSetFocus(const syscall_context& c, const hwnd /*hwnd*/)
+        {
+            auto& state = c.get_completion_state<focus_change_state>();
+            const auto previous = state.previous;
+            if (!state.sent_new_focus && c.thread().focus_window == state.target)
+            {
+                if (const auto* target = c.proc.windows.get(state.target))
+                {
+                    state.sent_new_focus = true;
+                    dispatch_window_message(c, callback_id::NtUserSetFocus, std::move(state), *target, WM_SETFOCUS, previous);
+                    return {};
+                }
             }
             return previous;
         }
@@ -8813,7 +8850,8 @@ namespace sogen
             }
 
             const auto target_thread_id = thread_id == 0 ? c.vcpu.active_thread->id : thread_id;
-            if (c.proc.find_thread_by_id(target_thread_id) == nullptr)
+            const auto* target_thread = c.proc.find_thread_by_id(target_thread_id);
+            if (target_thread == nullptr)
             {
                 return FALSE;
             }
@@ -8841,7 +8879,7 @@ namespace sogen
             {
                 return FALSE;
             }
-            info = {.cbSize = sizeof(info), .hwndActive = active, .hwndFocus = active, .hwndCapture = capture};
+            info = {.cbSize = sizeof(info), .hwndActive = active, .hwndFocus = target_thread->focus_window, .hwndCapture = capture};
             c.emu.write_memory(info_address, info);
 
             return TRUE;

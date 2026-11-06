@@ -306,6 +306,28 @@ namespace sogen
         }
     };
 
+    struct focus_change_state : completion_state
+    {
+        hwnd previous{};
+        hwnd target{};
+        bool sent_new_focus{};
+
+      private:
+        void serialize_object(utils::buffer_serializer& buffer) const override
+        {
+            buffer.write(this->previous);
+            buffer.write(this->target);
+            buffer.write(this->sent_new_focus);
+        }
+
+        void deserialize_object(utils::buffer_deserializer& buffer) override
+        {
+            buffer.read(this->previous);
+            buffer.read(this->target);
+            buffer.read(this->sent_new_focus);
+        }
+    };
+
     struct message_call_state : completion_state
     {
         hwnd window{};

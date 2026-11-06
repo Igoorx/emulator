@@ -1,6 +1,7 @@
 #include "../std_include.hpp"
 #include "surface_alpha.hpp"
 #include "window_geometry.hpp"
+#include "../keyboard_layout.hpp"
 #include "../vulkan_handle_utils.hpp"
 #include <platform/ui_backend.hpp>
 
@@ -875,6 +876,16 @@ namespace sogen
                         const uint32_t message = (is_alt || vk == VK_F10 || alt_context) ? WM_SYSKEYDOWN : WM_KEYDOWN;
 
                         this->post_event(guest, message, vk, scan);
+                        if (message == WM_KEYDOWN)
+                        {
+                            std::array<uint8_t, 256> keys{};
+                            keys[VK_CONTROL] = (event.key.mod & SDL_KMOD_CTRL) != 0 ? 0x80 : 0;
+                            const auto character = key_character(static_cast<uint32_t>(vk), keys);
+                            if (character != 0 && (character < 0x20 || character == 0x7f))
+                            {
+                                this->post_event(guest, WM_CHAR, character, scan);
+                            }
+                        }
                         break;
                     }
 
