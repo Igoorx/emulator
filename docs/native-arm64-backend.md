@@ -2,8 +2,11 @@
 
 Enable with `-DSOGEN_ENABLE_NATIVE_ARM64=ON` on an ARM64 Linux or Android host.
 Select with `--backend native-arm64` or `EMULATOR_NATIVE_ARM64=1`.
-Use `--native-timing --no-inst-precision`; deterministic counter interception is not implemented.
-MMIO interception can be enabled independently through `emulator_settings::intercept_kusd`.
+Use `--no-inst-precision`. This backend defaults to `--native-timing=counter` even when the option is omitted,
+leaving shared-data MMIO interception enabled. Bare `--native-timing` also selects `counter` here.
+Explicit `--native-timing=all` selects native counter reads and periodically refreshed shared data.
+Other backends retain their existing defaults: interception when the option is absent, or `all` when it is bare.
+On macOS shared data remains intercepted in either mode. Native timing is incompatible with `--reproducible`.
 
 This is a normal `arm64_emulator` backend. The existing Windows PE loader, process context,
 `emulator_thread`, TEB/PEB initialization, ntdll bootstrap and syscall dispatcher are shared with
@@ -75,7 +78,7 @@ EMULATOR_NATIVE_ARM64=1 build/release/artifacts/arm64-backend-test \
   --gtest_filter=Arm64BackendTest.SyscallReturnsToEl0WithArgumentsAndRegistersIntact
 EMULATOR_ARM64_ROOT="$HOME/sogen/win2025root_arm64" \
   ctest --test-dir build/release -R '^native-arm64-emulation-test$' --output-on-failure
-build/release/artifacts/analyzer --backend native-arm64 --native-timing --no-inst-precision \
+build/release/artifacts/analyzer --backend native-arm64 --no-inst-precision \
   --emulation "$HOME/sogen/win2025root_arm64" \
   --mount "$HOME/sogen/build/release/src/samples/native-arm64-hello/native-arm64-hello.exe:C:\native-arm64-hello.exe:ro" \
   -s 'C:\native-arm64-hello.exe'

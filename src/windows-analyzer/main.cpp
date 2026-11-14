@@ -102,7 +102,7 @@ namespace sogen
             std::optional<backend_type> backend{};
             network::network_mode network{network::network_mode::offline};
             std::optional<bool> instruction_precision{};
-            bool native_timing{false};
+            std::optional<std::string> native_timing{};
             bool keep_guest_time{false};
             uint32_t vcpu_count{1};
             std::filesystem::path registry_path{get_current_binary_dir() / "registry"};
@@ -182,6 +182,10 @@ namespace sogen
             if (options.instruction_precision)
             {
                 arguments.emplace_back(*options.instruction_precision ? "--inst-precision" : "--no-inst-precision");
+            }
+            if (options.native_timing)
+            {
+                arguments.emplace_back(options.native_timing->empty() ? "--native-timing" : "--native-timing=" + *options.native_timing);
             }
 
             const auto add_path = [&](const std::string_view option, const std::filesystem::path& path) {
@@ -714,14 +718,37 @@ namespace sogen
         constexpr bool kusd_needs_intercept = false;
 #endif
 
+        std::optional<std::string> resolve_native_timing(const analysis_options& options, const std::optional<PEMachineType> machine)
+        {
+            if (options.native_timing && !options.native_timing->empty())
+            {
+                return options.native_timing;
+            }
+            auto backend = options.backend;
+            if (!backend && machine)
+            {
+                backend = backend_from_environment_for(*machine);
+            }
+            if (backend == backend_type::native_arm64)
+            {
+                return "counter";
+            }
+            return options.native_timing ? std::optional<std::string>{"all"} : std::nullopt;
+        }
+
         emulator_settings create_emulator_settings(const analysis_options& options,
                                                    const std::optional<PEMachineType> machine = std::nullopt)
         {
+            const auto native_timing = resolve_native_timing(options, machine);
+            if (native_timing && options.reproducible)
+            {
+                throw std::invalid_argument("Native timing cannot be combined with --reproducible");
+            }
             return {
                 .use_relative_time = options.reproducible,
                 .use_instruction_precision = uses_instruction_precision(options, machine),
-                .intercept_rdtsc = !options.native_timing,
-                .intercept_kusd = kusd_needs_intercept || !options.native_timing,
+                .intercept_rdtsc = !native_timing,
+                .intercept_kusd = kusd_needs_intercept || native_timing != "all",
                 .keep_guest_time_across_snapshots = options.keep_guest_time,
                 .emulation_root = options.emulation_root,
                 .registry_directory = options.registry_path,
@@ -1221,6 +1248,7 @@ namespace sogen
             // Stop parsing at the first positional (the application to analyze) and forward everything after it
             // verbatim to the emulated program.
             app.prefix_command();
+            app.validate_optional_arguments();
             app.footer("Examples:\n"
                        "  analyzer -v -e path/to/root myapp.exe\n"
                        "  analyzer --report run.jsonl test-sample.exe\n"
@@ -1258,10 +1286,16 @@ namespace sogen
             app.add_flag("--skip-syscalls", options.skip_syscalls, "Skip the logging of regular syscalls");
             auto* const reproducible_option =
                 app.add_flag("--reproducible", options.reproducible, "Stub clocks and other mechanisms to make executions reproducible");
-            app.add_flag("--native-timing", options.native_timing,
-                         "Let the guest read the host TSC and a periodically refreshed KUSER_SHARED_DATA without trapping (faster, "
-                         "timing is no longer exact); on macOS KUSER_SHARED_DATA stays trapped and only rdtsc runs natively")
-                ->excludes(reproducible_option);
+            std::string native_timing_mode{};
+            auto* const native_timing_option =
+                app.add_option("--native-timing", native_timing_mode,
+                               "Use native counter reads (counter), or also periodically refreshed KUSER_SHARED_DATA (all); "
+                               "native-arm64 defaults to counter even without this option; other backends default to all when "
+                               "the option has no mode; on macOS KUSER_SHARED_DATA stays trapped")
+                    ->type_name("MODE")
+                    ->expected(0, 1)
+                    ->check(CLI::IsMember({"counter", "all"}))
+                    ->excludes(reproducible_option);
             app.add_flag("--keep-guest-time", options.keep_guest_time,
                          "Keep the guest's time across snapshots: its clocks stand still while the process is saved or loaded "
                          "and continue from the save, as a game that times out without its server needs");
@@ -1341,6 +1375,11 @@ namespace sogen
             app.add_option("--env", environment, "Set an environment variable")->type_name("NAME VALUE")->allow_extra_args(false);
 
             CLI11_PARSE(app, argc, argv);
+
+            if (native_timing_option->count() != 0)
+            {
+                options.native_timing = std::move(native_timing_mode);
+            }
 
             if (argc <= 1)
             {
