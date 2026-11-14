@@ -44,13 +44,9 @@ namespace sogen
         const std::map<std::string, backend_type>& get_backend_names()
         {
             static const std::map<std::string, backend_type> backends{
-                {"unicorn", backend_type::unicorn},
-                {"icicle", backend_type::icicle},
-                {"whp", backend_type::whp},
-                {"kvm", backend_type::kvm},
-                {"fex", backend_type::fex},
-                {"hvf", backend_type::hvf},
-                {"native-arm64", backend_type::native_arm64},
+                {"unicorn", backend_type::unicorn}, {"icicle", backend_type::icicle}, {"whp", backend_type::whp},
+                {"kvm", backend_type::kvm},         {"fex", backend_type::fex},       {"hvf", backend_type::hvf},
+                {"seccomp", backend_type::seccomp},
             };
             return backends;
         }
@@ -729,7 +725,7 @@ namespace sogen
             {
                 backend = backend_from_environment_for(*machine);
             }
-            if (backend == backend_type::native_arm64)
+            if (backend == backend_type::seccomp)
             {
                 return "counter";
             }
@@ -1290,7 +1286,7 @@ namespace sogen
             auto* const native_timing_option =
                 app.add_option("--native-timing", native_timing_mode,
                                "Use native counter reads (counter), or also periodically refreshed KUSER_SHARED_DATA (all); "
-                               "native-arm64 defaults to counter even without this option; other backends default to all when "
+                               "seccomp defaults to counter even without this option; other backends default to all when "
                                "the option has no mode; on macOS KUSER_SHARED_DATA stays trapped")
                     ->type_name("MODE")
                     ->expected(0, 1)
@@ -1346,9 +1342,8 @@ namespace sogen
                 ->check(CLI::IsMember({"offline", "live"}));
 
             std::string backend_name{};
-            app.add_option("--backend", backend_name,
-                           "Select CPU backend: unicorn, icicle, whp, kvm, fex, hvf or native-arm64 (overrides env)")
-                ->check(CLI::IsMember({"unicorn", "icicle", "whp", "kvm", "fex", "hvf", "native-arm64"}));
+            app.add_option("--backend", backend_name, "Select CPU backend: unicorn, icicle, whp, kvm, fex, hvf or seccomp (overrides env)")
+                ->check(CLI::IsMember({"unicorn", "icicle", "whp", "kvm", "fex", "hvf", "seccomp"}));
 
             std::vector<std::string> tracked_modules{};
             app.add_option("-m,--module", tracked_modules, "Specify module(s) to track")->allow_extra_args(false);

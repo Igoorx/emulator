@@ -10,7 +10,7 @@ list(REMOVE_ITEM SRC_FILES
   "${CMAKE_CURRENT_SOURCE_DIR}/arm64_backend_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/x86_64_backend_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/fex_hvf_spike_test.cpp"
-  "${CMAKE_CURRENT_SOURCE_DIR}/native_arm64_emulation_test.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/seccomp_emulation_test.cpp"
 )
 
 if(SOGEN_ENABLE_FEX AND SOGEN_ENABLE_HVF)
@@ -60,17 +60,17 @@ sogen_target_skip_clang_tidy(windows-architecture-test)
 
 add_executable(windows-emulator-test ${SRC_FILES})
 
-if(SOGEN_ENABLE_NATIVE_ARM64)
-  add_executable(native-arm64-emulation-test native_arm64_emulation_test.cpp)
-  target_link_libraries(native-arm64-emulation-test PRIVATE windows-emulator backend-selection gtest gtest_main)
-  add_dependencies(native-arm64-emulation-test native-arm64-hello native-arm64-illegal-instruction native-arm64-single-step)
-  target_compile_definitions(native-arm64-emulation-test PRIVATE
-    SOGEN_NATIVE_ARM64_SAMPLE="${NATIVE_ARM64_SAMPLE}"
-    SOGEN_NATIVE_ARM64_ILLEGAL_INSTRUCTION_SAMPLE="${NATIVE_ARM64_ILLEGAL_INSTRUCTION_SAMPLE}"
-    SOGEN_NATIVE_ARM64_SINGLE_STEP_SAMPLE="${NATIVE_ARM64_SINGLE_STEP_SAMPLE}")
-  add_test(NAME native-arm64-emulation-test COMMAND native-arm64-emulation-test)
-  set_tests_properties(native-arm64-emulation-test PROPERTIES TIMEOUT 30)
-  sogen_targets_set_folder("tests" native-arm64-emulation-test)
+if(SOGEN_ENABLE_SECCOMP)
+  add_executable(seccomp-emulation-test seccomp_emulation_test.cpp)
+  target_link_libraries(seccomp-emulation-test PRIVATE windows-emulator backend-selection gtest gtest_main)
+  add_dependencies(seccomp-emulation-test seccomp-hello seccomp-illegal-instruction seccomp-single-step)
+  target_compile_definitions(seccomp-emulation-test PRIVATE
+    SOGEN_SECCOMP_SAMPLE="${SECCOMP_SAMPLE}"
+    SOGEN_SECCOMP_ILLEGAL_INSTRUCTION_SAMPLE="${SECCOMP_ILLEGAL_INSTRUCTION_SAMPLE}"
+    SOGEN_SECCOMP_SINGLE_STEP_SAMPLE="${SECCOMP_SINGLE_STEP_SAMPLE}")
+  add_test(NAME seccomp-emulation-test COMMAND seccomp-emulation-test)
+  set_tests_properties(seccomp-emulation-test PROPERTIES TIMEOUT 30)
+  sogen_targets_set_folder("tests" seccomp-emulation-test)
 endif()
 
 sogen_assign_source_group(${SRC_FILES})

@@ -17,16 +17,16 @@ namespace sogen
         kvm,
         fex,
         hvf,
-        native_arm64,
+        seccomp,
     };
 
     std::unique_ptr<x86_64_emulator> create_x86_64_emulator(backend_type backend = backend_type::unicorn, size_t vcpu_count = 1);
     std::unique_ptr<arm64_emulator> create_arm64_emulator(backend_type backend, size_t vcpu_count = 1);
     backend_type get_x86_64_emulator_backend_from_environment();
 
-    // The host's hardware backend where one is usable (WHP on Windows ARM64; Hypervisor.framework on Apple
-    // Silicon when the process holds the hypervisor entitlement), Unicorn otherwise. Outside Windows ARM64,
-    // EMULATOR_UNICORN=1 selects Unicorn.
+    // EMULATOR_SECCOMP=1 takes precedence when seccomp is enabled. Otherwise select WHP on Windows ARM64,
+    // Hypervisor.framework on entitled Apple Silicon processes, and Unicorn on other hosts.
+    // Outside Windows ARM64, EMULATOR_UNICORN=1 overrides the hardware backend.
     backend_type get_arm64_emulator_backend_from_environment();
     std::unique_ptr<arm64_emulator> create_arm64_emulator_from_environment(size_t vcpu_count = 1);
 

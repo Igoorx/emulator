@@ -73,7 +73,7 @@ namespace sogen
         }
     };
 
-    // Native ARM64 stubs carry the syscall ID in SVC's immediate, followed by RET X30.
+    // ARM64 Windows stubs carry the syscall ID in SVC's immediate, followed by RET X30.
     struct arm64_syscall_abi : arch_syscall_abi
     {
         const char* name() const override
