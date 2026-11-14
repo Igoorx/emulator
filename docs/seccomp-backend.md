@@ -62,26 +62,30 @@ without producing callbacks. Unsupported guest signals stop execution with PC an
 
 ## Build and run
 
-A MinGW ARM64 Windows C compiler is required for the samples. CMake searches `~/mingw/bin` and PATH;
-set `SECCOMP_MINGW_CC` to select another compiler. On Termux, add `-DSOGEN_ENABLE_AAUDIO=OFF` when configuring.
-The Windows ARM64 emulation root must contain `filesys/c/windows/system32/apisetschema.dll` and registry hives.
+Enable the backend with `SOGEN_ENABLE_SECCOMP`. Its unit tests are part of the normal
+`windows-emulator-test` target and require no Windows binaries or cross compiler.
 
 ```sh
-export EMULATOR_ARM64_ROOT=/path/to/windows-arm64-root
 cmake --preset release -DSOGEN_ENABLE_SECCOMP=ON
-cmake --build --preset release --target analyzer seccomp-emulation-test -j2
-ctest --test-dir build/release -R '^seccomp-emulation-test$' --output-on-failure
-build/release/artifacts/analyzer --backend seccomp --no-inst-precision \
-  --emulation "$EMULATOR_ARM64_ROOT" \
-  --mount "$PWD/build/release/src/samples/seccomp-hello/seccomp-hello.exe:C:\seccomp-hello.exe:ro" \
-  -s 'C:\seccomp-hello.exe'
+cmake --build --preset release --target analyzer windows-emulator-test
+build/release/artifacts/windows-emulator-test --gtest_filter='*Seccomp*'
 ```
 
-The `seccomp-hello` sample calls `GetStdHandle`, `WriteFile` and `ExitProcess` through the Windows DLLs,
-which route console output through `NtWriteFile`. It links without the C runtime and prints `Hello World`.
-The regression target checks the console output and exit status, illegal-instruction delivery, hardware
-single-stepping, MMIO load semantics, register preservation and base-register writeback. The
-`seccomp-illegal-instruction` and `seccomp-single-step` samples exercise Windows guest exception handlers.
+Use a Windows ARM64 emulation root and an ARM64 Windows executable. The root must contain
+`filesys/c/windows/system32/apisetschema.dll` and registry hives. Programs can be provided through
+the root filesystem or a host mount:
+
+```sh
+build/release/artifacts/analyzer --backend seccomp --no-inst-precision \
+  --emulation /path/to/windows-arm64-root \
+  --mount '/path/to/test-sample.exe:C:\test-sample.exe:ro' \
+  -s 'C:\test-sample.exe'
+```
+
+The backend tests cover illegal-instruction delivery, hardware single-stepping, MMIO load semantics,
+register preservation and base-register writeback. The existing ARM64 integration tests use
+`EMULATOR_ARM64_ROOT`; select this backend with `EMULATOR_SECCOMP=1`. The ordinary `test-sample`
+exercises Windows startup, console output, guest exception handling and single-stepping.
 
 References: [Linux seccomp filter API](https://docs.kernel.org/userspace-api/seccomp_filter.html)
 and [ASoftware iOS for Android](https://github.com/alpersamur3/asoft-ios-android).

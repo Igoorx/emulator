@@ -20,10 +20,6 @@ add_subdirectory(linux-gdb-stub)
 add_subdirectory(macos-emulator)
 add_subdirectory(backend-selection)
 
-if(SOGEN_ENABLE_SECCOMP)
-  add_subdirectory(samples/seccomp-hello)
-endif()
-
 if(SOGEN_ENABLE_PYTHON_BINDINGS)
   add_subdirectory(python-bindings)
 endif()

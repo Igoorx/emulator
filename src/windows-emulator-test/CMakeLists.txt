@@ -10,7 +10,6 @@ list(REMOVE_ITEM SRC_FILES
   "${CMAKE_CURRENT_SOURCE_DIR}/arm64_backend_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/x86_64_backend_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/fex_hvf_spike_test.cpp"
-  "${CMAKE_CURRENT_SOURCE_DIR}/seccomp_emulation_test.cpp"
 )
 
 if(SOGEN_ENABLE_FEX AND SOGEN_ENABLE_HVF)
@@ -60,19 +59,6 @@ sogen_target_skip_clang_tidy(windows-architecture-test)
 
 add_executable(windows-emulator-test ${SRC_FILES})
 
-if(SOGEN_ENABLE_SECCOMP)
-  add_executable(seccomp-emulation-test seccomp_emulation_test.cpp)
-  target_link_libraries(seccomp-emulation-test PRIVATE windows-emulator backend-selection gtest gtest_main)
-  add_dependencies(seccomp-emulation-test seccomp-hello seccomp-illegal-instruction seccomp-single-step)
-  target_compile_definitions(seccomp-emulation-test PRIVATE
-    SOGEN_SECCOMP_SAMPLE="${SECCOMP_SAMPLE}"
-    SOGEN_SECCOMP_ILLEGAL_INSTRUCTION_SAMPLE="${SECCOMP_ILLEGAL_INSTRUCTION_SAMPLE}"
-    SOGEN_SECCOMP_SINGLE_STEP_SAMPLE="${SECCOMP_SINGLE_STEP_SAMPLE}")
-  add_test(NAME seccomp-emulation-test COMMAND seccomp-emulation-test)
-  set_tests_properties(seccomp-emulation-test PROPERTIES TIMEOUT 30)
-  sogen_targets_set_folder("tests" seccomp-emulation-test)
-endif()
-
 sogen_assign_source_group(${SRC_FILES})
 
 target_link_libraries(windows-emulator-test PRIVATE
@@ -89,6 +75,10 @@ target_link_libraries(windows-emulator-test PRIVATE
 if (SOGEN_ENABLE_FEX)
   target_compile_definitions(windows-emulator-test PRIVATE SOGEN_ENABLE_FEX=1)
   target_link_libraries(windows-emulator-test PRIVATE fex-emulator)
+endif()
+
+if(SOGEN_ENABLE_SECCOMP)
+  target_compile_definitions(windows-emulator-test PRIVATE SOGEN_ENABLE_SECCOMP=1)
 endif()
 
 if(EMSCRIPTEN)

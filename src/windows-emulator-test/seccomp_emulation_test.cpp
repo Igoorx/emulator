@@ -1,9 +1,8 @@
 #include "emulation_test_utils.hpp"
 
-#include <cstdlib>
 #include <cstring>
 
-#ifdef SOGEN_SECCOMP_SAMPLE
+#ifdef SOGEN_ENABLE_SECCOMP
 namespace sogen::test
 {
     namespace
@@ -552,90 +551,5 @@ namespace sogen::test
         EXPECT_FALSE(machine->try_write_memory(mmio_address, &value, sizeof(value)));
     }
 
-    TEST(SeccompEmulationTest, NtWriteFileUsesSharedWindowsProcessAndThreadSetup)
-    {
-        const auto* root = std::getenv("EMULATOR_ARM64_ROOT");
-        if (!root || !*root)
-        {
-            GTEST_SKIP() << "Set EMULATOR_ARM64_ROOT to an ARM64 emulation root";
-        }
-
-        emulator_settings settings{};
-        settings.emulation_root = root;
-        settings.intercept_rdtsc = false;
-        settings.intercept_kusd = true;
-        settings.use_instruction_precision = false;
-        settings.mounts = {
-            {.host_path = SOGEN_SECCOMP_SAMPLE, .guest_path = windows_path{"C:\\seccomp-hello.exe"}, .mode = filesystem_mode::read_only}};
-        std::string output{};
-        emulator_callbacks callbacks{};
-        callbacks.on_stdout = [&](const std::string_view data) { output.append(data); };
-        emulator_interfaces interfaces{};
-        interfaces.ui = std::make_unique<null_ui_backend>();
-
-        windows_emulator emu{create_arm64_emulator(backend_type::seccomp), application_settings{.application = "C:\\seccomp-hello.exe"},
-                             settings, std::move(callbacks), std::move(interfaces)};
-        emu.log.disable_output(!enable_verbose_logging());
-        emu.start();
-
-        EXPECT_EQ(emu.process.exit_status, STATUS_SUCCESS);
-        EXPECT_EQ(output, "Hello World\n");
-    }
-
-    TEST(SeccompEmulationTest, IllegalInstructionReachesGuestHandlerAndResumes)
-    {
-        const auto* root = std::getenv("EMULATOR_ARM64_ROOT");
-        if (!root || !*root)
-        {
-            GTEST_SKIP() << "Set EMULATOR_ARM64_ROOT to an ARM64 emulation root";
-        }
-
-        emulator_settings settings{};
-        settings.emulation_root = root;
-        settings.intercept_rdtsc = false;
-        settings.intercept_kusd = false;
-        settings.use_instruction_precision = false;
-        settings.mounts = {{.host_path = SOGEN_SECCOMP_ILLEGAL_INSTRUCTION_SAMPLE,
-                            .guest_path = windows_path{"C:\\seccomp-illegal-instruction.exe"},
-                            .mode = filesystem_mode::read_only}};
-        emulator_interfaces interfaces{};
-        interfaces.ui = std::make_unique<null_ui_backend>();
-
-        windows_emulator emu{create_arm64_emulator(backend_type::seccomp),
-                             application_settings{.application = "C:\\seccomp-illegal-instruction.exe"}, settings, emulator_callbacks{},
-                             std::move(interfaces)};
-        emu.log.disable_output(!enable_verbose_logging());
-        emu.start();
-
-        EXPECT_EQ(emu.process.exit_status, STATUS_SUCCESS);
-    }
-
-    TEST(SeccompEmulationTest, SoftwareStepReachesGuestHandlerAfterExactlyOneInstruction)
-    {
-        const auto* root = std::getenv("EMULATOR_ARM64_ROOT");
-        if (!root || !*root)
-        {
-            GTEST_SKIP() << "Set EMULATOR_ARM64_ROOT to an ARM64 emulation root";
-        }
-
-        emulator_settings settings{};
-        settings.emulation_root = root;
-        settings.intercept_rdtsc = false;
-        settings.intercept_kusd = false;
-        settings.use_instruction_precision = false;
-        settings.mounts = {{.host_path = SOGEN_SECCOMP_SINGLE_STEP_SAMPLE,
-                            .guest_path = windows_path{"C:\\seccomp-single-step.exe"},
-                            .mode = filesystem_mode::read_only}};
-        emulator_interfaces interfaces{};
-        interfaces.ui = std::make_unique<null_ui_backend>();
-
-        windows_emulator emu{create_arm64_emulator(backend_type::seccomp),
-                             application_settings{.application = "C:\\seccomp-single-step.exe"}, settings, emulator_callbacks{},
-                             std::move(interfaces)};
-        emu.log.disable_output(!enable_verbose_logging());
-        emu.start();
-
-        EXPECT_EQ(emu.process.exit_status, STATUS_SUCCESS);
-    }
 }
 #endif
