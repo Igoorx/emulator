@@ -348,6 +348,7 @@ namespace sogen::test
 
         this->emu->memory.write_memory(header + 0x10, uint64_t{4096});
         EXPECT_TRUE(this->play_cursor_reaches(header + 0x18, 4096));
+        EXPECT_TRUE(this->play_cursor_reaches(header + 0x98, 4096));
     }
 
     TEST_F(AudioServiceTest, ReadsWindows10IsFormatSupportedFormat)
@@ -375,6 +376,7 @@ namespace sogen::test
 
         this->emu->memory.write_memory(header + 0x10, uint64_t{4096});
         EXPECT_TRUE(this->play_cursor_reaches(header + 0x18, 4096));
+        EXPECT_TRUE(this->play_cursor_reaches(header + 0x98, 4096));
     }
 
     TEST_F(AudioServiceTest, PlacesWindows10RenderSectionAfterItsThirdStreamI64)
@@ -414,5 +416,6 @@ namespace sogen::test
 
         this->emu->memory.write_memory(header + 0x18, uint64_t{4096});
         EXPECT_TRUE(this->play_cursor_reaches(header + 0x20, 4096));
+        EXPECT_TRUE(this->play_cursor_reaches(header + 0xA0, 4096));
     }
 }
