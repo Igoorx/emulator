@@ -86,10 +86,12 @@ CALL :collect d3d12.dll
 CALL :collect d3d9.dll
 CALL :collect d3dcompiler_43.dll
 CALL :collect d3dcompiler_47.dll
+CALL :collect d3dim700.dll
 CALL :collect dbghelp.dll
 CALL :collect dbgcore.dll
 CALL :collect dciman32.dll
 CALL :collect ddraw.dll
+CALL :collect devenum.dll
 CALL :collect devobj.dll
 CALL :collect diagnosticdatasettings.dll
 CALL :collect dinput.dll
@@ -139,6 +141,7 @@ CALL :collect mscoree.dll
 CALL :collect msdmo.dll
 CALL :collect msimg32.dll
 CALL :collect mskeyprotect.dll
+CALL :collect msmpeg2adec.dll
 CALL :collect msvcp140.dll
 CALL :collect msvcp140_1.dll
 CALL :collect msvcp140_2.dll
@@ -180,6 +183,8 @@ CALL :collect_file "%WINDIR%\SystemResources", imageres.dll.mun, %EMU_SYSTEMRESO
 CALL :collect_file "%WINDIR%\SystemResources", shell32.dll.mun, %EMU_SYSTEMRESOURCESDIR%
 CALL :collect_file "%WINDIR%", WindowsShell.Manifest, %EMU_WINDIR%
 CALL :collect psapi.dll
+CALL :collect qedit.dll
+CALL :collect quartz.dll
 CALL :collect rasadhlp.dll
 CALL :collect resampledmo.dll
 CALL :collect rpcrt4.dll
